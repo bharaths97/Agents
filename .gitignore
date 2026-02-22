@@ -3,6 +3,9 @@
 *.py[cod]
 *.pyo
 *.pyd
+.venv
+.pytest_cache
+*-old*
 
 # Local environment files
 .env

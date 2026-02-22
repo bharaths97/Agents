@@ -14,7 +14,7 @@ from agents.agent_1e import Agent1e
 from agents.semgrep_evidence_agent import SemgrepEvidenceAgent
 from config import settings
 from rag import RAGStore
-from schemas.models import Agent1eOutput, ThreatModel
+from schemas.models import Agent1eOutput, CtfArtifacts, ThreatModel, ThreatModelOutput
 from tooling import SemgrepScanResult
 from validation import LinkedFindingsResolver, SchemaValidator
 
@@ -29,6 +29,7 @@ class AnalysisResult:
     scan: RepoScanResult
     call_graph: Dict[str, Any]
     phase3_links: List[Dict[str, Any]]
+    ctf_artifacts: Dict[str, Any]
     agent_1a: Dict[str, Any]
     agent_1b: Dict[str, Any]
     agent_1c: Dict[str, Any]
@@ -50,6 +51,7 @@ class AnalysisResult:
             },
             "call_graph": self.call_graph,
             "phase3_links": self.phase3_links,
+            "ctf_artifacts": self.ctf_artifacts,
             "agent_1a": self.agent_1a,
             "agent_1b": self.agent_1b,
             "agent_1c": self.agent_1c,
@@ -155,19 +157,23 @@ class TaintAnalystOrchestrator:
         )
 
         task_1e = asyncio.create_task(agent_1e.run(terrain_queue))
-        threat_model = await agent_1d.run(out_1a, out_1b, out_1c, terrain_queue)
-        if threat_model is None:
-            threat_model = ThreatModel(
-                methodology="STRIDE",
-                domain=out_1a.domain,
-                domain_risk_tier=out_1a.domain_risk_tier,
-                regulatory_context=out_1a.regulatory_context,
-                assets=[],
-                trust_boundaries=[],
-                attack_surface=[],
-                stride_analysis=[],
-                prioritized_threat_scenarios=[],
+        threat_bundle = await agent_1d.run(out_1a, out_1b, out_1c, terrain_queue)
+        if threat_bundle is None:
+            threat_bundle = ThreatModelOutput(
+                ctf_artifacts=CtfArtifacts(summary="", hits=[]),
+                threat_model=ThreatModel(
+                    methodology="STRIDE",
+                    domain=out_1a.domain,
+                    domain_risk_tier=out_1a.domain_risk_tier,
+                    regulatory_context=out_1a.regulatory_context,
+                    assets=[],
+                    trust_boundaries=[],
+                    attack_surface=[],
+                    stride_analysis=[],
+                    prioritized_threat_scenarios=[],
+                ),
             )
+        threat_model = threat_bundle.threat_model
         agent_1e.threat_model = threat_model
         out_1e: List[Agent1eOutput] = await task_1e
 
@@ -202,6 +208,7 @@ class TaintAnalystOrchestrator:
             scan=scan,
             call_graph=call_graph_summary,
             phase3_links=phase3_links,
+            ctf_artifacts=threat_bundle.ctf_artifacts.model_dump(),
             agent_1a=out_1a.model_dump(),
             agent_1b=out_1b.model_dump(),
             agent_1c=out_1c.model_dump(),
