@@ -22,7 +22,7 @@ import aiofiles
 from .base import BaseAgent
 from .agent_1d import TERRAIN_DONE
 from .code_scanner_prompts import AGENT_BASE_INSTRUCTIONS, AGENT_1E_TAINT_TRACER
-from schemas.models import TerrainObject, Agent1eOutput, ThreatModel
+from schemas.models import Agent1eOutput, FlowMapEntry, TerrainObject, ThreatModel, TransformationStep
 from validation.adversarial import AdversarialVerifier
 from validation.schema_validator import SchemaValidator
 
@@ -86,6 +86,9 @@ Output ONLY the full Agent 1e JSON object per the schema in your instructions ab
 )
 
 MAX_FILE_CHARS = 24_000
+MAX_STRUCTURED_CHAIN_MATCHES = 4
+CHAIN_CONFIDENCE_DECAY_PER_HOP = 0.04
+CHAIN_CONFIDENCE_DECAY_CAP = 0.35
 
 
 class Agent1e(BaseAgent):
@@ -201,7 +204,7 @@ class Agent1e(BaseAgent):
 
         # --- Phase 3 deterministic chain scoring / boundary enrichment ---
         pair_chain_index = self._build_pair_chain_index(pairs)
-        output = self._apply_chain_scoring(output, pair_chain_index)
+        output = self._apply_chain_scoring(output, pairs, pair_chain_index)
 
         # --- Adversarial verification for HIGH/CRITICAL findings ---
         output = await self._adversarial_pass(output)
@@ -247,6 +250,8 @@ Output ONLY the JSON object with source_sink_pairs array.
                 temperature=0.0,
             )
             pairs = raw.get("source_sink_pairs", [])
+            if not isinstance(pairs, list):
+                pairs = []
             return self._enrich_pairs_with_call_graph(terrain.file, pairs)
         except Exception as exc:
             logger.error(f"[{self.name}] Pass 1 failed for {terrain.file}: {exc}")
@@ -392,126 +397,299 @@ Output ONLY the full JSON object per the schema.
         for pair in pairs:
             if not isinstance(pair, dict):
                 continue
+
             source_var = str(pair.get("source_variable", "")).strip()
-            linked = self._match_call_chains(source_var, call_chains)
+            source_line = self._safe_int(pair.get("source_line"))
+            linked = self._select_call_chains_for_pair(source_var, source_line, call_chains)
             pair["linked_call_chains"] = linked
 
-            if linked:
-                chain = linked[0]
-                hops = chain.get("hops", [])
-                tchain = list(pair.get("transformation_chain", []))
-                step_num = len(tchain) + 1
-                for hop in hops[:5]:
-                    tchain.append(
-                        {
-                            "step": step_num,
-                            "line": int(hop.get("call_line", 0) or 0),
-                            "operation": (
-                                f"cross-file call {hop.get('from_function', 'unknown')} -> "
-                                f"{hop.get('to_function', 'unknown')}"
-                            ),
-                            "sanitization_applied": False,
-                            "sanitization_notes": "Cross-file hop inferred from call graph",
-                            "crosses_file_boundary": True,
-                            "target_file": hop.get("to_file"),
-                            "target_function": hop.get("to_function"),
-                            "parameter_mapping": hop.get("parameter_mapping", {}),
-                        }
-                    )
-                    step_num += 1
-                pair["transformation_chain"] = tchain
+            transformation_chain = list(pair.get("transformation_chain", []))
+            updated_chain, added_steps = self._append_cross_file_steps(transformation_chain, linked)
+            pair["transformation_chain"] = updated_chain
+            pair["phase3_cross_file_summary"] = {
+                "linked_chain_count": len(linked),
+                "cross_file_steps_added": added_steps,
+                "max_chain_length": max(
+                    [self._safe_int(item.get("chain_length")) for item in linked] or [0]
+                ),
+            }
             enriched.append(pair)
         return enriched
 
-    @staticmethod
-    def _match_call_chains(source_var: str, call_chains: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _select_call_chains_for_pair(
+        self,
+        source_var: str,
+        source_line: int,
+        call_chains: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
         if not call_chains:
             return []
-        if not source_var:
-            return call_chains[:2]
 
-        matched = []
+        scored: List[tuple[int, int, Dict[str, Any]]] = []
         for chain in call_chains:
-            for hop in chain.get("hops", []):
-                mapping = hop.get("parameter_mapping", {})
-                values = {str(v) for v in mapping.values()}
-                keys = {str(k) for k in mapping.keys()}
-                if source_var in values or source_var in keys:
-                    matched.append(chain)
-                    break
-        if matched:
-            return matched[:3]
-        return call_chains[:2]
+            score = self._chain_match_score(source_var, source_line, chain)
+            chain_len = self._safe_int(chain.get("chain_length"), default=0)
+            scored.append((score, chain_len, chain))
 
-    def _build_pair_chain_index(self, pairs: List[Dict[str, Any]]) -> Dict[tuple[str, str, str], Dict[str, Any]]:
-        index: Dict[tuple[str, str, str], Dict[str, Any]] = {}
+        scored.sort(key=lambda item: (-item[0], -item[1]))
+        selected: List[Dict[str, Any]] = []
+        for score, _, chain in scored:
+            if not selected:
+                selected.append(chain)
+                continue
+            if score <= 0 and len(selected) >= 2:
+                break
+            selected.append(chain)
+            if len(selected) >= MAX_STRUCTURED_CHAIN_MATCHES:
+                break
+        return selected
+
+    def _chain_match_score(self, source_var: str, source_line: int, chain: Dict[str, Any]) -> int:
+        score = 0
+        normalized_source = self._normalize_symbol(source_var)
+        hops = chain.get("hops", []) or []
+
+        if normalized_source:
+            for hop in hops:
+                mapping = hop.get("parameter_mapping", {}) or {}
+                values = {self._normalize_symbol(v) for v in mapping.values()}
+                keys = {self._normalize_symbol(k) for k in mapping.keys()}
+                if normalized_source in values or normalized_source in keys:
+                    score += 8
+                    break
+
+        if source_line > 0 and hops:
+            first_call_line = self._safe_int(hops[0].get("call_line"), default=0)
+            if first_call_line > 0:
+                line_distance = abs(first_call_line - source_line)
+                if line_distance <= 5:
+                    score += 4
+                elif line_distance <= 15:
+                    score += 2
+
+        chain_length = self._safe_int(chain.get("chain_length"), default=len(hops))
+        if chain_length >= 2:
+            score += 1
+        return score
+
+    def _append_cross_file_steps(
+        self,
+        transformation_chain: List[Dict[str, Any]],
+        linked_chains: List[Dict[str, Any]],
+    ) -> tuple[List[Dict[str, Any]], int]:
+        if not linked_chains:
+            return transformation_chain, 0
+
+        updated_chain = list(transformation_chain)
+        existing_hops = {
+            (
+                self._safe_int(step.get("line"), default=0),
+                str(step.get("target_file", "")),
+                str(step.get("target_function", "")),
+            )
+            for step in updated_chain
+            if isinstance(step, dict) and step.get("crosses_file_boundary")
+        }
+
+        added = 0
+        for chain in linked_chains[:MAX_STRUCTURED_CHAIN_MATCHES]:
+            hops = chain.get("hops", []) or []
+            for hop in hops:
+                hop_key = (
+                    self._safe_int(hop.get("call_line"), default=0),
+                    str(hop.get("to_file", "")),
+                    str(hop.get("to_function", "")),
+                )
+                if hop_key in existing_hops:
+                    continue
+                existing_hops.add(hop_key)
+                updated_chain.append(
+                    {
+                        "step": 0,
+                        "line": self._safe_int(hop.get("call_line"), default=0),
+                        "operation": (
+                            f"cross-file call {hop.get('from_function', 'unknown')} -> "
+                            f"{hop.get('to_function', 'unknown')}"
+                        ),
+                        "sanitization_applied": False,
+                        "sanitization_notes": "Cross-file hop inferred from call graph",
+                        "crosses_file_boundary": True,
+                        "target_file": hop.get("to_file"),
+                        "target_function": hop.get("to_function"),
+                        "parameter_mapping": dict(hop.get("parameter_mapping", {}) or {}),
+                    }
+                )
+                added += 1
+
+        for idx, step in enumerate(updated_chain, start=1):
+            if isinstance(step, dict):
+                step["step"] = idx
+        return updated_chain, added
+
+    def _build_pair_chain_index(self, pairs: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        index: Dict[str, Dict[str, Any]] = {}
         for pair in pairs:
             source_var = str(pair.get("source_variable", ""))
+            source_line = self._safe_int(pair.get("source_line"), default=0)
             linked = pair.get("linked_call_chains", []) or []
             if not linked:
                 continue
 
             primary = linked[0]
-            hops = primary.get("hops", [])
-            chain_length = int(primary.get("chain_length", len(hops)) or len(hops))
+            hops = list(primary.get("hops", []) or [])
+            if not hops:
+                continue
+
+            chain_length = self._safe_int(primary.get("chain_length"), default=len(hops))
+            cross_file_hops = [
+                hop for hop in hops if str(hop.get("from_file", "")) != str(hop.get("to_file", ""))
+            ]
+            if not cross_file_hops:
+                continue
+
+            mapped_hops = sum(1 for hop in hops if hop.get("parameter_mapping"))
+            mapping_ratio = mapped_hops / max(1, len(hops))
+            info = {
+                "source_variable": source_var,
+                "source_line": source_line,
+                "boundary_hops": hops,
+                "chain_length": chain_length,
+                "cross_file_hops": len(cross_file_hops),
+                "mapping_ratio": mapping_ratio,
+                "crosses_file_boundary": True,
+            }
+
             reaches = pair.get("reaches_sinks", []) or []
+            if not reaches:
+                for lookup in self._pair_lookup_keys(source_var, "", "", 0):
+                    existing = index.get(lookup)
+                    if existing is None or info["chain_length"] > existing["chain_length"]:
+                        index[lookup] = info
+                continue
+
             for sink in reaches:
                 sink_fn = str(sink.get("sink_fn", ""))
                 sink_var = str(sink.get("sink_variable", ""))
-                key = (source_var, sink_fn, sink_var)
-                index[key] = {
-                    "boundary_hops": hops,
-                    "chain_length": chain_length,
-                    "crosses_file_boundary": chain_length > 0 and any(
-                        str(h.get("from_file", "")) != str(h.get("to_file", ""))
-                        for h in hops
-                    ),
-                }
+                sink_line = self._safe_int(
+                    sink.get("sink_line", sink.get("line", 0)),
+                    default=0,
+                )
+                for lookup in self._pair_lookup_keys(source_var, sink_fn, sink_var, sink_line):
+                    existing = index.get(lookup)
+                    if existing is None or info["chain_length"] > existing["chain_length"]:
+                        index[lookup] = info
         return index
+
+    @classmethod
+    def _pair_lookup_keys(
+        cls,
+        source_var: str,
+        sink_fn: str,
+        sink_var: str,
+        sink_line: int,
+    ) -> List[str]:
+        normalized_source = cls._normalize_symbol(source_var)
+        normalized_sink_fn = cls._normalize_symbol(sink_fn)
+        normalized_sink_var = cls._normalize_symbol(sink_var)
+        line = sink_line if sink_line > 0 else 0
+        return [
+            f"{normalized_source}|{normalized_sink_fn}|{normalized_sink_var}|{line}",
+            f"{normalized_source}|{normalized_sink_fn}|{normalized_sink_var}|0",
+            f"{normalized_source}|{normalized_sink_fn}||{line}",
+            f"{normalized_source}|{normalized_sink_fn}||0",
+            f"{normalized_source}|||0",
+        ]
+
+    def _lookup_chain_info(self, pair_chain_index: Dict[str, Dict[str, Any]], finding) -> Optional[Dict[str, Any]]:
+        source_var = str(finding.source.get("variable", ""))
+        sink_fn = str(finding.sink.get("sink_fn", ""))
+        sink_var = str(finding.sink.get("variable", ""))
+        sink_line = self._safe_int(
+            finding.sink.get("line", finding.sink.get("sink_line", 0)),
+            default=0,
+        )
+        for lookup in self._pair_lookup_keys(source_var, sink_fn, sink_var, sink_line):
+            info = pair_chain_index.get(lookup)
+            if info is not None:
+                return info
+        return None
 
     def _apply_chain_scoring(
         self,
         output: Agent1eOutput,
-        pair_chain_index: Dict[tuple[str, str, str], Dict[str, Any]],
+        pairs: List[Dict[str, Any]],
+        pair_chain_index: Dict[str, Dict[str, Any]],
     ) -> Agent1eOutput:
+        enriched_flow_map = self._enrich_pass1_flow_map(output.pass1_flow_map, pairs)
         if not output.taint_findings:
-            return output
+            return Agent1eOutput(
+                file=output.file,
+                pass1_flow_map=enriched_flow_map,
+                taint_findings=output.taint_findings,
+                conflict_resolutions=output.conflict_resolutions,
+                clean_paths=output.clean_paths,
+                low_confidence_observations=output.low_confidence_observations,
+            )
 
-        updated = []
+        updated_findings = []
         for finding in output.taint_findings:
-            source_var = str(finding.source.get("variable", ""))
-            sink_fn = str(finding.sink.get("sink_fn", ""))
-            sink_var = str(finding.sink.get("variable", ""))
-
-            info = pair_chain_index.get((source_var, sink_fn, sink_var))
+            info = self._lookup_chain_info(pair_chain_index, finding)
             if info is None:
-                info = pair_chain_index.get((source_var, sink_fn, ""))
-
-            if info is None:
-                updated.append(finding)
+                updated_findings.append(finding)
                 continue
 
-            chain_length = int(info.get("chain_length", 0) or 0)
-            crosses = bool(info.get("crosses_file_boundary", False))
-            boundary_hops = info.get("boundary_hops", [])
+            chain_length = self._safe_int(info.get("chain_length"), default=0)
+            cross_file_hops = self._safe_int(info.get("cross_file_hops"), default=0)
+            boundary_hops = list(info.get("boundary_hops", []) or [])
+            mapping_ratio = float(info.get("mapping_ratio", 0.0) or 0.0)
 
             confidence = finding.confidence
             reasoning = list(finding.confidence_reasoning)
-            if chain_length > 1:
-                decay = min(0.30, 0.05 * (chain_length - 1))
-                confidence = max(0.0, confidence - decay)
-                reasoning.append(
-                    f"Confidence decayed by {decay:.2f} due to cross-file chain length {chain_length}."
+
+            if cross_file_hops > 0:
+                decay = min(
+                    CHAIN_CONFIDENCE_DECAY_CAP,
+                    CHAIN_CONFIDENCE_DECAY_PER_HOP * max(0, cross_file_hops - 1),
+                )
+                if chain_length > cross_file_hops:
+                    decay += 0.02 * (chain_length - cross_file_hops)
+                decay = min(CHAIN_CONFIDENCE_DECAY_CAP, decay)
+                if decay > 0:
+                    confidence = max(0.0, confidence - decay)
+                    self._append_reason_once(
+                        reasoning,
+                        (
+                            "Confidence decayed by "
+                            f"{decay:.2f} from {cross_file_hops} cross-file hop(s) "
+                            f"(chain length {chain_length})."
+                        ),
+                    )
+
+            if mapping_ratio >= 0.6:
+                confidence = min(1.0, confidence + 0.02)
+                self._append_reason_once(
+                    reasoning,
+                    f"Parameter mapping supported across {mapping_ratio:.0%} of chain hops.",
+                )
+            elif mapping_ratio == 0.0:
+                confidence = max(0.0, confidence - 0.03)
+                self._append_reason_once(
+                    reasoning,
+                    "No parameter mapping evidence across chain hops; confidence reduced.",
                 )
 
+            sink_fn = str(finding.sink.get("sink_fn", ""))
             if self._has_semgrep_corroboration(output.file, finding.cwe, sink_fn):
                 confidence = min(1.0, confidence + 0.03)
-                reasoning.append("Semgrep corroboration matched file/CWE or sink context.")
+                self._append_reason_once(
+                    reasoning,
+                    "Semgrep corroboration matched file/CWE or sink context.",
+                )
 
-            updated.append(
+            updated_findings.append(
                 finding.model_copy(
                     update={
-                        "crosses_file_boundary": crosses,
+                        "crosses_file_boundary": True,
                         "boundary_hops": boundary_hops,
                         "chain_length": chain_length if chain_length > 0 else None,
                         "confidence": round(confidence, 4),
@@ -522,12 +700,73 @@ Output ONLY the full JSON object per the schema.
 
         return Agent1eOutput(
             file=output.file,
-            pass1_flow_map=output.pass1_flow_map,
-            taint_findings=updated,
+            pass1_flow_map=enriched_flow_map,
+            taint_findings=updated_findings,
             conflict_resolutions=output.conflict_resolutions,
             clean_paths=output.clean_paths,
             low_confidence_observations=output.low_confidence_observations,
         )
+
+    def _enrich_pass1_flow_map(
+        self,
+        flow_map: List[FlowMapEntry],
+        pairs: List[Dict[str, Any]],
+    ) -> List[FlowMapEntry]:
+        if not flow_map or not pairs:
+            return flow_map
+
+        pair_by_source: Dict[str, Dict[str, Any]] = {}
+        for pair in pairs:
+            if not isinstance(pair, dict):
+                continue
+            source_var = self._normalize_symbol(pair.get("source_variable", ""))
+            if not source_var:
+                continue
+            linked = pair.get("linked_call_chains", []) or []
+            existing = pair_by_source.get(source_var)
+            if existing is None or len(linked) > len(existing.get("linked_call_chains", [])):
+                pair_by_source[source_var] = pair
+
+        enriched_entries: List[FlowMapEntry] = []
+        for entry in flow_map:
+            source_var = self._normalize_symbol(entry.source_variable)
+            pair = pair_by_source.get(source_var)
+            if not pair:
+                enriched_entries.append(entry)
+                continue
+
+            linked = list(pair.get("linked_call_chains", []) or [])
+            current_chain = [step.model_dump() for step in entry.transformation_chain]
+            updated_chain, added = self._append_cross_file_steps(current_chain, linked)
+            update_payload: Dict[str, Any] = {}
+            if linked and (not entry.linked_call_chains):
+                update_payload["linked_call_chains"] = linked
+            if added > 0:
+                update_payload["transformation_chain"] = [
+                    TransformationStep(**step) for step in updated_chain
+                ]
+
+            if update_payload:
+                enriched_entries.append(entry.model_copy(update=update_payload))
+            else:
+                enriched_entries.append(entry)
+        return enriched_entries
+
+    @staticmethod
+    def _append_reason_once(reasoning: List[str], reason: str) -> None:
+        if reason not in reasoning:
+            reasoning.append(reason)
+
+    @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _normalize_symbol(value: Any) -> str:
+        return str(value or "").strip().lower()
 
     def _has_semgrep_corroboration(self, file_path: str, cwe: str, sink_fn: str) -> bool:
         hits = self.semgrep_findings_by_file.get(file_path, [])

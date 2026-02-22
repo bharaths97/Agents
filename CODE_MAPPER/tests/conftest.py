@@ -300,6 +300,56 @@ def mock_semgrep_findings():
 
 
 @pytest.fixture
+def fixture_repo_longer_chain(tmp_path):
+    """Create multi-file repository with longer call chains (A→B→C→D) for Phase 3 testing."""
+    repo = tmp_path / "longer_chain"
+    repo.mkdir()
+
+    # File A: entry point, receives untrusted input
+    (repo / "entry.py").write_text("""from handler import process_data
+
+def route_handler(user_input):
+    # Entry point receives unsanitized user input
+    result = process_data(user_input)
+    return result
+""")
+
+    # File B: intermediate transformation
+    (repo / "handler.py").write_text("""from validator import validate_input
+
+def process_data(data):
+    # Passes data to next layer without sanitization
+    checked = validate_input(data)
+    return checked
+""")
+
+    # File C: another transformation layer
+    (repo / "validator.py").write_text("""from executor import execute_query
+
+def validate_input(input_str):
+    # Minimal validation, passes to executor
+    if len(input_str) > 0:
+        return execute_query(input_str)
+    return None
+""")
+
+    # File D: final sink (SQL execution)
+    (repo / "executor.py").write_text("""import sqlite3
+
+def execute_query(query_str):
+    # Receives unsanitized input through call chain A→B→C→D
+    conn = sqlite3.connect('app.db')
+    # SQL injection at end of chain!
+    result = conn.execute(f"SELECT * FROM users WHERE data = '{query_str}'")
+    return result.fetchall()
+""")
+
+    (repo / "README.md").write_text("# Longer Call Chain Test Fixture")
+
+    return repo
+
+
+@pytest.fixture
 def mock_rag_store():
     """Mock RAG store for testing."""
     store = AsyncMock()
