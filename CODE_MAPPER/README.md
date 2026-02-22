@@ -40,6 +40,8 @@ Cross-file tracing is available behind feature flags:
 - `PHASE3_CALL_GRAPH_MAX_HOPS=5`
 - `PHASE3_CALL_GRAPH_MAX_CHAINS_PER_FILE=20`
 
+When enabled, Agent 1e links call chains only when chain-match scores pass a minimum threshold (with fallback only when exactly one candidate chain exists).
+
 ## Documentation
 
 Detailed setup, configuration, architecture, and implementation guidance is in the [`docs/`](./docs/) folder.
