@@ -87,6 +87,7 @@ Output ONLY the full Agent 1e JSON object per the schema in your instructions ab
 
 MAX_FILE_CHARS = 24_000
 MAX_STRUCTURED_CHAIN_MATCHES = 4
+MIN_CHAIN_MATCH_SCORE = 2
 CHAIN_CONFIDENCE_DECAY_PER_HOP = 0.04
 CHAIN_CONFIDENCE_DECAY_CAP = 0.35
 
@@ -432,17 +433,19 @@ Output ONLY the full JSON object per the schema.
             scored.append((score, chain_len, chain))
 
         scored.sort(key=lambda item: (-item[0], -item[1]))
-        selected: List[Dict[str, Any]] = []
-        for score, _, chain in scored:
-            if not selected:
-                selected.append(chain)
-                continue
-            if score <= 0 and len(selected) >= 2:
-                break
-            selected.append(chain)
-            if len(selected) >= MAX_STRUCTURED_CHAIN_MATCHES:
-                break
-        return selected
+        selected = [
+            chain
+            for score, _, chain in scored
+            if score >= MIN_CHAIN_MATCH_SCORE
+        ][:MAX_STRUCTURED_CHAIN_MATCHES]
+        if selected:
+            return selected
+
+        if len(scored) == 1:
+            # Conservative fallback: allow a single candidate chain when no alternatives exist.
+            return [scored[0][2]]
+
+        return []
 
     def _chain_match_score(self, source_var: str, source_line: int, chain: Dict[str, Any]) -> int:
         score = 0
