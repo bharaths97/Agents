@@ -98,11 +98,13 @@ class Agent1e(BaseAgent):
         threat_model: Optional[ThreatModel] = None,
         repo_path: Optional[Path] = None,
         semgrep_findings_by_file: Optional[Dict[str, List[dict]]] = None,
+        call_graph_index=None,
     ):
         super().__init__(model=model, rag_store=rag_store)
         self.threat_model = threat_model
         self.repo_path = repo_path
         self.semgrep_findings_by_file = semgrep_findings_by_file or {}
+        self.call_graph_index = call_graph_index
         self.adversarial = AdversarialVerifier(model=model, rag_store=rag_store)
         self.validator = SchemaValidator()
 
@@ -165,6 +167,7 @@ class Agent1e(BaseAgent):
         # Threat model hints for prioritization
         threat_hints = self._extract_threat_hints(terrain.file)
         semgrep_hints = self._extract_semgrep_hints(terrain.file)
+        call_graph_hints = self._extract_call_graph_hints(terrain.file)
 
         # --- Pass 1: Enumerate source-sink pairs ---
         pairs = await self._pass1_enumerate(
@@ -172,6 +175,7 @@ class Agent1e(BaseAgent):
             source_code,
             threat_hints,
             semgrep_hints,
+            call_graph_hints,
             rag_context,
         )
 
@@ -191,8 +195,13 @@ class Agent1e(BaseAgent):
             source_code,
             pairs,
             semgrep_hints,
+            call_graph_hints,
             rag_context,
         )
+
+        # --- Phase 3 deterministic chain scoring / boundary enrichment ---
+        pair_chain_index = self._build_pair_chain_index(pairs)
+        output = self._apply_chain_scoring(output, pair_chain_index)
 
         # --- Adversarial verification for HIGH/CRITICAL findings ---
         output = await self._adversarial_pass(output)
@@ -208,6 +217,7 @@ class Agent1e(BaseAgent):
         source_code: str,
         threat_hints: str,
         semgrep_hints: str,
+        call_graph_hints: str,
         rag_context: str,
     ) -> List[Dict[str, Any]]:
         """Pass 1: map source-sink flows structurally without assessing exploitability."""
@@ -219,6 +229,7 @@ class Agent1e(BaseAgent):
 
 {threat_hints}
 {semgrep_hints}
+{call_graph_hints}
 
 ## Actual Source Code
 {source_code}
@@ -235,7 +246,8 @@ Output ONLY the JSON object with source_sink_pairs array.
                 user_prompt=user_prompt,
                 temperature=0.0,
             )
-            return raw.get("source_sink_pairs", [])
+            pairs = raw.get("source_sink_pairs", [])
+            return self._enrich_pairs_with_call_graph(terrain.file, pairs)
         except Exception as exc:
             logger.error(f"[{self.name}] Pass 1 failed for {terrain.file}: {exc}")
             return []
@@ -246,6 +258,7 @@ Output ONLY the JSON object with source_sink_pairs array.
         source_code: str,
         pairs: List[Dict[str, Any]],
         semgrep_hints: str,
+        call_graph_hints: str,
         rag_context: str,
     ) -> Agent1eOutput:
         """Pass 2: assess exploitability for each enumerated pair."""
@@ -259,6 +272,7 @@ Output ONLY the JSON object with source_sink_pairs array.
 {json.dumps(pairs, indent=2)}
 
 {semgrep_hints}
+{call_graph_hints}
 
 ## Actual Source Code
 {source_code}
@@ -334,6 +348,205 @@ Output ONLY the full JSON object per the schema.
             return ""
         payload = json.dumps(hits[:20], indent=2)
         return f"\n## Semgrep Corroboration Hints\n{payload}\n"
+
+    def _extract_call_graph_hints(self, file_path: str) -> str:
+        if self.call_graph_index is None:
+            return ""
+        try:
+            hints = self.call_graph_index.file_hints(file_path)
+        except Exception as exc:
+            logger.debug(f"[{self.name}] Call graph hints unavailable for {file_path}: {exc}")
+            return ""
+
+        direct_calls = hints.get("direct_cross_file_calls", [])
+        call_chains = hints.get("call_chains", [])
+        if not direct_calls and not call_chains:
+            return ""
+
+        payload = {
+            "file": hints.get("file", file_path),
+            "stats": hints.get("stats", {}),
+            "direct_cross_file_calls": direct_calls[:10],
+            "call_chains": call_chains[:10],
+        }
+        return (
+            "\n## Phase 3 Cross-File Call Graph Hints\n"
+            "Use these as structural hints only. Validate against actual source code.\n"
+            f"{json.dumps(payload, indent=2)}\n"
+        )
+
+    def _enrich_pairs_with_call_graph(self, file_path: str, pairs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if self.call_graph_index is None or not pairs:
+            return pairs
+        try:
+            hints = self.call_graph_index.file_hints(file_path)
+        except Exception as exc:
+            logger.debug(f"[{self.name}] Could not enrich with call graph for {file_path}: {exc}")
+            return pairs
+
+        call_chains = hints.get("call_chains", [])
+        if not call_chains:
+            return pairs
+
+        enriched: List[Dict[str, Any]] = []
+        for pair in pairs:
+            if not isinstance(pair, dict):
+                continue
+            source_var = str(pair.get("source_variable", "")).strip()
+            linked = self._match_call_chains(source_var, call_chains)
+            pair["linked_call_chains"] = linked
+
+            if linked:
+                chain = linked[0]
+                hops = chain.get("hops", [])
+                tchain = list(pair.get("transformation_chain", []))
+                step_num = len(tchain) + 1
+                for hop in hops[:5]:
+                    tchain.append(
+                        {
+                            "step": step_num,
+                            "line": int(hop.get("call_line", 0) or 0),
+                            "operation": (
+                                f"cross-file call {hop.get('from_function', 'unknown')} -> "
+                                f"{hop.get('to_function', 'unknown')}"
+                            ),
+                            "sanitization_applied": False,
+                            "sanitization_notes": "Cross-file hop inferred from call graph",
+                            "crosses_file_boundary": True,
+                            "target_file": hop.get("to_file"),
+                            "target_function": hop.get("to_function"),
+                            "parameter_mapping": hop.get("parameter_mapping", {}),
+                        }
+                    )
+                    step_num += 1
+                pair["transformation_chain"] = tchain
+            enriched.append(pair)
+        return enriched
+
+    @staticmethod
+    def _match_call_chains(source_var: str, call_chains: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not call_chains:
+            return []
+        if not source_var:
+            return call_chains[:2]
+
+        matched = []
+        for chain in call_chains:
+            for hop in chain.get("hops", []):
+                mapping = hop.get("parameter_mapping", {})
+                values = {str(v) for v in mapping.values()}
+                keys = {str(k) for k in mapping.keys()}
+                if source_var in values or source_var in keys:
+                    matched.append(chain)
+                    break
+        if matched:
+            return matched[:3]
+        return call_chains[:2]
+
+    def _build_pair_chain_index(self, pairs: List[Dict[str, Any]]) -> Dict[tuple[str, str, str], Dict[str, Any]]:
+        index: Dict[tuple[str, str, str], Dict[str, Any]] = {}
+        for pair in pairs:
+            source_var = str(pair.get("source_variable", ""))
+            linked = pair.get("linked_call_chains", []) or []
+            if not linked:
+                continue
+
+            primary = linked[0]
+            hops = primary.get("hops", [])
+            chain_length = int(primary.get("chain_length", len(hops)) or len(hops))
+            reaches = pair.get("reaches_sinks", []) or []
+            for sink in reaches:
+                sink_fn = str(sink.get("sink_fn", ""))
+                sink_var = str(sink.get("sink_variable", ""))
+                key = (source_var, sink_fn, sink_var)
+                index[key] = {
+                    "boundary_hops": hops,
+                    "chain_length": chain_length,
+                    "crosses_file_boundary": chain_length > 0 and any(
+                        str(h.get("from_file", "")) != str(h.get("to_file", ""))
+                        for h in hops
+                    ),
+                }
+        return index
+
+    def _apply_chain_scoring(
+        self,
+        output: Agent1eOutput,
+        pair_chain_index: Dict[tuple[str, str, str], Dict[str, Any]],
+    ) -> Agent1eOutput:
+        if not output.taint_findings:
+            return output
+
+        updated = []
+        for finding in output.taint_findings:
+            source_var = str(finding.source.get("variable", ""))
+            sink_fn = str(finding.sink.get("sink_fn", ""))
+            sink_var = str(finding.sink.get("variable", ""))
+
+            info = pair_chain_index.get((source_var, sink_fn, sink_var))
+            if info is None:
+                info = pair_chain_index.get((source_var, sink_fn, ""))
+
+            if info is None:
+                updated.append(finding)
+                continue
+
+            chain_length = int(info.get("chain_length", 0) or 0)
+            crosses = bool(info.get("crosses_file_boundary", False))
+            boundary_hops = info.get("boundary_hops", [])
+
+            confidence = finding.confidence
+            reasoning = list(finding.confidence_reasoning)
+            if chain_length > 1:
+                decay = min(0.30, 0.05 * (chain_length - 1))
+                confidence = max(0.0, confidence - decay)
+                reasoning.append(
+                    f"Confidence decayed by {decay:.2f} due to cross-file chain length {chain_length}."
+                )
+
+            if self._has_semgrep_corroboration(output.file, finding.cwe, sink_fn):
+                confidence = min(1.0, confidence + 0.03)
+                reasoning.append("Semgrep corroboration matched file/CWE or sink context.")
+
+            updated.append(
+                finding.model_copy(
+                    update={
+                        "crosses_file_boundary": crosses,
+                        "boundary_hops": boundary_hops,
+                        "chain_length": chain_length if chain_length > 0 else None,
+                        "confidence": round(confidence, 4),
+                        "confidence_reasoning": reasoning,
+                    }
+                )
+            )
+
+        return Agent1eOutput(
+            file=output.file,
+            pass1_flow_map=output.pass1_flow_map,
+            taint_findings=updated,
+            conflict_resolutions=output.conflict_resolutions,
+            clean_paths=output.clean_paths,
+            low_confidence_observations=output.low_confidence_observations,
+        )
+
+    def _has_semgrep_corroboration(self, file_path: str, cwe: str, sink_fn: str) -> bool:
+        hits = self.semgrep_findings_by_file.get(file_path, [])
+        if not hits and self.repo_path:
+            alt = str((self.repo_path / file_path).resolve()) if not Path(file_path).is_absolute() else file_path
+            hits = self.semgrep_findings_by_file.get(alt, [])
+        if not hits:
+            return False
+
+        normalized_cwe = (cwe or "").upper()
+        sink_fn_l = (sink_fn or "").lower()
+        for hit in hits:
+            cwes = [str(item).upper() for item in hit.get("cwe", [])]
+            if normalized_cwe and normalized_cwe in cwes:
+                return True
+            message = str(hit.get("message", "")).lower()
+            if sink_fn_l and sink_fn_l in message:
+                return True
+        return False
 
     async def _read_source_file(self, file_path: str) -> str:
         """Read the actual source file from disk."""

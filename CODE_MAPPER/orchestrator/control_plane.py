@@ -16,8 +16,9 @@ from config import settings
 from rag import RAGStore
 from schemas.models import Agent1eOutput, ThreatModel
 from tooling import SemgrepScanResult
-from validation import SchemaValidator
+from validation import LinkedFindingsResolver, SchemaValidator
 
+from .call_graph import CallGraphIndex
 from .repo_scanner import RepoScanResult, RepoScanner
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,8 @@ logger = logging.getLogger(__name__)
 @dataclass
 class AnalysisResult:
     scan: RepoScanResult
+    call_graph: Dict[str, Any]
+    phase3_links: List[Dict[str, Any]]
     agent_1a: Dict[str, Any]
     agent_1b: Dict[str, Any]
     agent_1c: Dict[str, Any]
@@ -39,11 +42,14 @@ class AnalysisResult:
             "scan": {
                 "code_files": [str(p) for p in self.scan.code_files],
                 "context_files": [str(p) for p in self.scan.context_files],
+                "unknown_files": [str(p) for p in self.scan.unknown_files],
                 "detected_languages": self.scan.detected_languages,
                 "detected_frameworks": self.scan.detected_frameworks,
                 "detected_infra": self.scan.detected_infra,
                 "manifests": [str(p) for p in self.scan.manifests],
             },
+            "call_graph": self.call_graph,
+            "phase3_links": self.phase3_links,
             "agent_1a": self.agent_1a,
             "agent_1b": self.agent_1b,
             "agent_1c": self.agent_1c,
@@ -69,6 +75,36 @@ class TaintAnalystOrchestrator:
             len(scan.code_files),
             len(scan.context_files),
         )
+
+        call_graph_summary: Dict[str, Any] = {
+            "enabled": settings.phase3_cross_file_enabled,
+            "available": False,
+            "stats": {},
+        }
+        call_graph_index = None
+        if settings.phase3_cross_file_enabled:
+            call_graph_index = CallGraphIndex(
+                max_hops=settings.phase3_call_graph_max_hops,
+                max_chains_per_file=settings.phase3_call_graph_max_chains_per_file,
+            )
+            try:
+                await asyncio.to_thread(call_graph_index.build, self.repo_path, scan.code_files)
+                call_graph_summary = {
+                    "enabled": True,
+                    "available": True,
+                    "stats": call_graph_index.summary(),
+                    "max_hops": settings.phase3_call_graph_max_hops,
+                    "max_chains_per_file": settings.phase3_call_graph_max_chains_per_file,
+                }
+            except Exception as exc:
+                logger.warning("[Orchestrator] Call graph build failed: %s", exc)
+                call_graph_index = None
+                call_graph_summary = {
+                    "enabled": True,
+                    "available": False,
+                    "error": str(exc),
+                    "stats": {},
+                }
 
         rag_store = RAGStore(self._resolve_rag_docs())
         await rag_store.initialize()
@@ -115,6 +151,7 @@ class TaintAnalystOrchestrator:
             rag_store=rag_store,
             repo_path=self.repo_path,
             semgrep_findings_by_file=semgrep_findings_by_file,
+            call_graph_index=call_graph_index,
         )
 
         task_1e = asyncio.create_task(agent_1e.run(terrain_queue))
@@ -134,9 +171,15 @@ class TaintAnalystOrchestrator:
         agent_1e.threat_model = threat_model
         out_1e: List[Agent1eOutput] = await task_1e
 
+        phase3_links: List[Dict[str, Any]] = []
+        if settings.phase3_cross_file_enabled and call_graph_index is not None:
+            linker = LinkedFindingsResolver()
+            out_1e, phase3_links = linker.link_outputs(out_1e, call_graph_index=call_graph_index)
+
         summary = {
             "files_analyzed": len(scan.code_files),
             "context_files_analyzed": len(scan.context_files),
+            "unknown_files": len(scan.unknown_files),
             "insecure_practice_findings": len(out_1b.insecure_practice_findings),
             "logging_findings": len(out_1c.logging_findings),
             "taint_findings": sum(len(item.taint_findings) for item in out_1e),
@@ -145,10 +188,20 @@ class TaintAnalystOrchestrator:
             "semgrep_rules_selected": semgrep_result.rules_selected,
             "semgrep_findings": len(semgrep_result.findings),
             "semgrep_error": semgrep_result.error,
+            "phase3_cross_file_enabled": settings.phase3_cross_file_enabled,
+            "call_graph_available": bool(call_graph_index),
+            "call_graph_cross_file_edges": (
+                call_graph_summary.get("stats", {}).get("cross_file_edges", 0)
+                if call_graph_summary
+                else 0
+            ),
+            "phase3_linked_observations": len(phase3_links),
         }
 
         return AnalysisResult(
             scan=scan,
+            call_graph=call_graph_summary,
+            phase3_links=phase3_links,
             agent_1a=out_1a.model_dump(),
             agent_1b=out_1b.model_dump(),
             agent_1c=out_1c.model_dump(),

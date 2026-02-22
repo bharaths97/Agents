@@ -307,6 +307,10 @@ class TransformationStep(BaseModel):
     operation: str
     sanitization_applied: bool
     sanitization_notes: str
+    crosses_file_boundary: bool = False
+    target_file: Optional[str] = None
+    target_function: Optional[str] = None
+    parameter_mapping: Dict[str, str] = Field(default_factory=dict)
 
 
 class ReachesSink(BaseModel):
@@ -325,6 +329,7 @@ class FlowMapEntry(BaseModel):
     data_classification: str
     transformation_chain: List[TransformationStep]
     reaches_sinks: List[ReachesSink]
+    linked_call_chains: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class SanitizationInfo(BaseModel):
@@ -356,6 +361,9 @@ class TaintFinding(BaseModel):
     false_positive_notes: str
     remediation: str
     snippet: Optional[str] = None
+    crosses_file_boundary: bool = False
+    boundary_hops: List[Dict[str, Any]] = Field(default_factory=list)
+    chain_length: Optional[int] = None
 
     @field_validator("confidence_reasoning")
     @classmethod

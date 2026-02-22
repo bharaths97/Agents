@@ -10,14 +10,14 @@ class TestRepoScanner:
         """RepoScanner identifies Python files."""
         scanner = RepoScanner(fixture_repo_py_simple_sqli)
         result = scanner.scan()
-        assert "py" in result.detected_languages
+        assert ".py" in result.detected_languages
         assert any("app.py" in str(f) for f in result.code_files)
 
     def test_detects_javascript(self, fixture_repo_js_xss):
         """RepoScanner identifies JavaScript files."""
         scanner = RepoScanner(fixture_repo_js_xss)
         result = scanner.scan()
-        assert "js" in result.detected_languages
+        assert ".js" in result.detected_languages
         assert any("app.js" in str(f) for f in result.code_files)
 
     def test_detects_flask_framework(self, fixture_repo_py_simple_sqli):

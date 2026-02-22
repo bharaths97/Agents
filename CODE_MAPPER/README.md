@@ -27,6 +27,7 @@ REPO_PATH=/path/to/repo docker compose up --build
 
 A JSON report with:
 - Repository scan results (detected languages, frameworks, infrastructure)
+- Optional Phase 3 call graph summary (`results.call_graph`) and fallback links (`results.phase3_links`)
 - Per-file taint analysis findings
 - System-wide threat model
 - Vulnerability severity and confidence scores
