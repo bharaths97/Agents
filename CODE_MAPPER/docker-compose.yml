@@ -1,0 +1,40 @@
+version: "3.8"
+
+services:
+  taint-analyst:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ${REPO_PATH:-.}:/repo:ro               # Mount target repo (read-only)
+      - ${SEMGREP_RULES_PATH:-./semgrep-rules}:/semgrep-rules:ro
+      - ./output:/app/output                    # Analysis output
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      - OPENAI_ORGANIZATION=${OPENAI_ORGANIZATION:-}
+      - OPENAI_PROJECT=${OPENAI_PROJECT:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o}
+      - OPENAI_EMBEDDING_MODEL=${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - MAX_TOKENS_PER_CHUNK=${MAX_TOKENS_PER_CHUNK:-8000}
+      - CONCURRENT_FILE_WORKERS=${CONCURRENT_FILE_WORKERS:-3}
+      - RAG_DOCS_PATH=${RAG_DOCS_PATH:-rag/docs}
+      - SEMGREP_ENABLED=${SEMGREP_ENABLED:-true}
+      - SEMGREP_BINARY=${SEMGREP_BINARY:-semgrep}
+      - SEMGREP_APP_TOKEN=${SEMGREP_APP_TOKEN:-}
+      - SEMGREP_RULES_ROOT=${SEMGREP_RULES_ROOT:-/semgrep-rules}
+      - SEMGREP_MAX_RULES=${SEMGREP_MAX_RULES:-800}
+      - SEMGREP_TIMEOUT_SEC=${SEMGREP_TIMEOUT_SEC:-180}
+      - SEMGREP_MAX_FINDINGS_PER_FILE=${SEMGREP_MAX_FINDINGS_PER_FILE:-50}
+      - SEMGREP_INDEX_CACHE_FILE=${SEMGREP_INDEX_CACHE_FILE:-output/semgrep_rules_index.json}
+    env_file:
+      - .env
+    command:
+      - "--repo-path"
+      - "/repo"
+      - "--output-dir"
+      - "/app/output"
+      - "--model"
+      - "${OPENAI_MODEL:-gpt-4o}"
+    restart: "no"

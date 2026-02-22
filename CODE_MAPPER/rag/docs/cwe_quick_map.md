@@ -1,0 +1,32 @@
+# CWE Quick Map
+
+ - CWE-20: Improper Input Validation
+ - CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')
+ - CWE-77: Improper Neutralization of Special Elements used in a Command ('Command Injection')
+ - CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')
+ - CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting' / XSS)
+ - CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')
+ - CWE-94: Improper Control of Generation of Code ('Code Injection')
+ - CWE-120: Buffer Copy without Checking Size of Input ('Classic Buffer Overflow')
+ - CWE-121: Stack-based Buffer Overflow
+ - CWE-122: Heap-based Buffer Overflow
+ - CWE-125: Out-of-bounds Read
+ - CWE-200: Exposure of Sensitive Information to an Unauthorized Actor
+ - CWE-284: Improper Access Control
+ - CWE-287: Improper Authentication
+ - CWE-306: Missing Authentication for Critical Function
+ - CWE-319: Cleartext Transmission of Sensitive Information
+ - CWE-327: Use of a Broken or Risky Cryptographic Algorithm
+ - CWE-352: Cross-Site Request Forgery (CSRF)
+ - CWE-416: Use After Free
+ - CWE-434: Unrestricted Upload of File with Dangerous Type
+ - CWE-476: NULL Pointer Dereference
+ - CWE-502: Deserialization of Untrusted Data
+ - CWE-532: Insertion of Sensitive Information into Log File
+ - CWE-639: Authorization Bypass Through User-Controlled Key
+ - CWE-770: Allocation of Resources Without Limits or Throttling
+ - CWE-787: Out-of-bounds Write
+ - CWE-798: Use of Hard-coded Credentials
+ - CWE-862: Missing Authorization
+ - CWE-863: Incorrect Authorization
+ - CWE-918: Server-Side Request Forgery (SSRF)

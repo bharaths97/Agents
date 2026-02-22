@@ -1,0 +1,22 @@
+# Python caches and artifacts
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# CODE_MAPPER local runtime artifacts
+CODE_MAPPER/output/
+
+# CODE_MAPPER local documentation workspace (intentionally local-only)
+CODE_MAPPER/docs/
+
+# Local tooling metadata
+.claude/
+
+# macOS
+.DS_Store
