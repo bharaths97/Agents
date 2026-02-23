@@ -6,9 +6,11 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Dict
 
 from config import settings
 from orchestrator import TaintAnalystOrchestrator
+from reports import ReportGenerator
 
 
 def parse_args() -> argparse.Namespace:
@@ -53,7 +55,7 @@ def configure_logging(level: str) -> None:
     )
 
 
-async def run(args: argparse.Namespace) -> Path:
+async def run(args: argparse.Namespace) -> Dict[str, Path]:
     repo_path = args.repo_path.resolve()
     if not repo_path.exists() or not repo_path.is_dir():
         raise FileNotFoundError(f"Repo path does not exist or is not a directory: {repo_path}")
@@ -83,14 +85,25 @@ async def run(args: argparse.Namespace) -> Path:
         "results": result.to_dict(),
     }
     output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    return output_path
+
+    report_generator = ReportGenerator()
+    report_paths = report_generator.generate_all(
+        payload=payload,
+        output_dir=output_dir,
+        base_stem=output_path.stem,
+    )
+    report_paths["json"] = output_path
+    return report_paths
 
 
 def main() -> None:
     args = parse_args()
     configure_logging(args.log_level)
-    report_path = asyncio.run(run(args))
-    print(f"Analysis complete. Report written to: {report_path}")
+    report_paths = asyncio.run(run(args))
+    print(f"Analysis complete. JSON report written to: {report_paths['json']}")
+    print(f"Markdown report: {report_paths['markdown']}")
+    print(f"HTML report: {report_paths['html']}")
+    print(f"Remediation tickets: {report_paths['tickets']}")
 
 
 if __name__ == "__main__":
