@@ -16,7 +16,7 @@ from config import settings
 from rag import RAGStore
 from schemas.models import Agent1eOutput, CtfArtifacts, ThreatModel, ThreatModelOutput
 from tooling import SemgrepScanResult
-from validation import LinkedFindingsResolver, SchemaValidator
+from validation import FindingsCorrelator, LinkedFindingsResolver, SchemaValidator
 
 from .call_graph import CallGraphIndex
 from .repo_scanner import RepoScanResult, RepoScanner
@@ -29,6 +29,7 @@ class AnalysisResult:
     scan: RepoScanResult
     call_graph: Dict[str, Any]
     phase3_links: List[Dict[str, Any]]
+    correlated_findings: List[Dict[str, Any]]
     ctf_artifacts: Dict[str, Any]
     agent_1a: Dict[str, Any]
     agent_1b: Dict[str, Any]
@@ -51,6 +52,7 @@ class AnalysisResult:
             },
             "call_graph": self.call_graph,
             "phase3_links": self.phase3_links,
+            "correlated_findings": self.correlated_findings,
             "ctf_artifacts": self.ctf_artifacts,
             "agent_1a": self.agent_1a,
             "agent_1b": self.agent_1b,
@@ -182,6 +184,13 @@ class TaintAnalystOrchestrator:
             linker = LinkedFindingsResolver()
             out_1e, phase3_links = linker.link_outputs(out_1e, call_graph_index=call_graph_index)
 
+        correlator = FindingsCorrelator()
+        correlated_findings = correlator.correlate(
+            outputs=out_1e,
+            semgrep_findings_by_file=semgrep_findings_by_file,
+            phase3_links=phase3_links,
+        )
+
         summary = {
             "files_analyzed": len(scan.code_files),
             "context_files_analyzed": len(scan.context_files),
@@ -189,6 +198,7 @@ class TaintAnalystOrchestrator:
             "insecure_practice_findings": len(out_1b.insecure_practice_findings),
             "logging_findings": len(out_1c.logging_findings),
             "taint_findings": sum(len(item.taint_findings) for item in out_1e),
+            "correlated_findings": len(correlated_findings),
             "threat_scenarios": len(threat_model.prioritized_threat_scenarios),
             "ring1_candidates": self._determine_ring1_candidates(scan),
             "semgrep_rules_selected": semgrep_result.rules_selected,
@@ -208,6 +218,7 @@ class TaintAnalystOrchestrator:
             scan=scan,
             call_graph=call_graph_summary,
             phase3_links=phase3_links,
+            correlated_findings=correlated_findings,
             ctf_artifacts=threat_bundle.ctf_artifacts.model_dump(),
             agent_1a=out_1a.model_dump(),
             agent_1b=out_1b.model_dump(),

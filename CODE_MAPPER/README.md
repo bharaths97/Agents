@@ -27,8 +27,11 @@ REPO_PATH=/path/to/repo docker compose up --build
 
 A JSON report with:
 - Repository scan results (detected languages, frameworks, infrastructure)
+- Correlated findings (`results.correlated_findings`) with deterministic dedup + ranking
 - Optional Phase 3 call graph summary (`results.call_graph`) and fallback links (`results.phase3_links`)
+- CTF artifact aggregation (`results.ctf_artifacts`)
 - Optional Phase 3 linked-observation count in summary (`summary.phase3_linked_observations`)
+- Correlated-finding count in summary (`summary.correlated_findings`)
 - Per-file taint analysis findings
 - System-wide threat model
 - Vulnerability severity and confidence scores
