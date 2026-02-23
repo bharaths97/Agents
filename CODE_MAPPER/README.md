@@ -36,6 +36,11 @@ A JSON report with:
 - System-wide threat model
 - Vulnerability severity and confidence scores
 
+Phase 6 report files are also generated next to the JSON output:
+- `<report_name>.md` (human-readable Markdown report)
+- `<report_name>.html` (styled HTML report)
+- `<report_name>_tickets.json` (CRITICAL/HIGH remediation tickets)
+
 ## Phase 3 Controls
 
 Cross-file tracing is available behind feature flags:
