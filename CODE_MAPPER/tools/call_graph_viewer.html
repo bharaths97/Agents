@@ -1,0 +1,687 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CODE_MAPPER Call Graph Viewer</title>
+  <script src="https://cdn.jsdelivr.net/npm/cytoscape@3.28.1/dist/cytoscape.min.js"></script>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      background: #f5f7fb;
+      color: #1f2937;
+    }
+
+    .container {
+      display: flex;
+      height: 100vh;
+    }
+
+    .sidebar {
+      width: 300px;
+      background: white;
+      border-right: 1px solid #d1d5db;
+      overflow-y: auto;
+      padding: 20px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    }
+
+    .sidebar h2 {
+      font-size: 1rem;
+      margin-bottom: 16px;
+      color: #111827;
+    }
+
+    .sidebar h3 {
+      font-size: 0.875rem;
+      font-weight: 600;
+      margin-top: 16px;
+      margin-bottom: 8px;
+      color: #374151;
+    }
+
+    .file-input-wrapper {
+      margin-bottom: 20px;
+    }
+
+    #jsonFile {
+      width: 100%;
+      padding: 8px;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      font-size: 0.875rem;
+      cursor: pointer;
+    }
+
+    #jsonFile::file-selector-button {
+      background: #0f766e;
+      color: white;
+      border: none;
+      padding: 6px 12px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-weight: 500;
+      margin-right: 8px;
+    }
+
+    #jsonFile::file-selector-button:hover {
+      background: #0d5b54;
+    }
+
+    .stats {
+      background: #f3f4f6;
+      padding: 12px;
+      border-radius: 6px;
+      font-size: 0.875rem;
+      margin-bottom: 16px;
+    }
+
+    .stat-item {
+      display: flex;
+      justify-content: space-between;
+      padding: 4px 0;
+    }
+
+    .stat-label {
+      color: #6b7280;
+    }
+
+    .stat-value {
+      font-weight: 600;
+      color: #111827;
+    }
+
+    .filters {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .filter-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    input[type="checkbox"] {
+      cursor: pointer;
+    }
+
+    label {
+      font-size: 0.875rem;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .canvas-container {
+      flex: 1;
+      position: relative;
+      background: white;
+    }
+
+    #cy {
+      width: 100%;
+      height: 100%;
+    }
+
+    .controls {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      background: white;
+      padding: 12px;
+      border-radius: 6px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+      z-index: 10;
+    }
+
+    .control-btn {
+      background: #0f766e;
+      color: white;
+      border: none;
+      padding: 8px 12px;
+      border-radius: 4px;
+      font-size: 0.875rem;
+      cursor: pointer;
+      margin-bottom: 8px;
+      display: block;
+      width: 100%;
+    }
+
+    .control-btn:hover {
+      background: #0d5b54;
+    }
+
+    .control-btn:last-child {
+      margin-bottom: 0;
+    }
+
+    .empty-state {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      text-align: center;
+      color: #6b7280;
+    }
+
+    .error {
+      background: #fee;
+      color: #b91c1c;
+      padding: 12px;
+      border-radius: 6px;
+      font-size: 0.875rem;
+      margin-bottom: 16px;
+      display: none;
+    }
+
+    .error.show {
+      display: block;
+    }
+
+    .legend {
+      font-size: 0.875rem;
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px solid #d1d5db;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+
+    .legend-color {
+      width: 16px;
+      height: 16px;
+      border-radius: 3px;
+    }
+
+    .legend-label {
+      font-size: 0.8rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="sidebar">
+      <h2>📊 Call Graph Viewer</h2>
+
+      <div class="file-input-wrapper">
+        <input type="file" id="jsonFile" accept=".json" />
+      </div>
+
+      <div id="errorMsg" class="error"></div>
+
+      <div id="statsContainer" style="display: none;">
+        <h3>Graph Stats</h3>
+        <div class="stats">
+          <div class="stat-item">
+            <span class="stat-label">Functions:</span>
+            <span class="stat-value" id="statFunctions">-</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-label">Call Edges:</span>
+            <span class="stat-value" id="statEdges">-</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-label">Cross-File:</span>
+            <span class="stat-value" id="statCrossFile">-</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-label">Files:</span>
+            <span class="stat-value" id="statFiles">-</span>
+          </div>
+        </div>
+
+        <h3>Filters</h3>
+        <div class="filters">
+          <div class="filter-group">
+            <input type="checkbox" id="filterCrossFile" checked />
+            <label for="filterCrossFile">Show cross-file edges</label>
+          </div>
+          <div class="filter-group">
+            <input type="checkbox" id="filterSameFile" checked />
+            <label for="filterSameFile">Show same-file edges</label>
+          </div>
+          <div class="filter-group">
+            <input type="checkbox" id="filterIsolated" />
+            <label for="filterIsolated">Show isolated nodes</label>
+          </div>
+        </div>
+
+        <h3>Layout</h3>
+        <div class="filters">
+          <button class="control-btn" onclick="changeLayout('hierarchical')">
+            Hierarchical
+          </button>
+          <button class="control-btn" onclick="changeLayout('grid')">
+            Grid
+          </button>
+          <button class="control-btn" onclick="changeLayout('circle')">
+            Circle
+          </button>
+          <button class="control-btn" onclick="fitView()">
+            Fit View
+          </button>
+        </div>
+
+        <div class="legend">
+          <h3>Legend</h3>
+          <div class="legend-item">
+            <div class="legend-color" style="background: #0f766e;"></div>
+            <span class="legend-label">Function Node</span>
+          </div>
+          <div class="legend-item">
+            <div
+              class="legend-color"
+              style="
+                background: white;
+                border: 2px solid #0f766e;
+                width: 14px;
+                height: 14px;
+              "
+            ></div>
+            <span class="legend-label">Entry Point</span>
+          </div>
+          <div class="legend-item">
+            <div style="width: 16px; height: 2px; background: #0f766e;"></div>
+            <span class="legend-label">Same-file call</span>
+          </div>
+          <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+            <div
+              style="
+                width: 16px;
+                height: 2px;
+                background: #0f766e;
+                border-top: 2px dashed #0f766e;
+              "
+            ></div>
+            <span class="legend-label">Cross-file call</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="canvas-container">
+      <div id="cy"></div>
+      <div id="emptyState" class="empty-state">
+        <div>
+          <p style="font-size: 1rem; margin-bottom: 8px;">📁 Load a JSON report</p>
+          <p style="font-size: 0.875rem; color: #9ca3af;">
+            Select a <code>code_mapper_report_*.json</code> file to visualize the call graph
+          </p>
+        </div>
+      </div>
+      <div class="controls">
+        <button class="control-btn" onclick="resetView()">Reset</button>
+        <button class="control-btn" onclick="exportPNG()">Export PNG</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let cy = null;
+    let currentLayout = "hierarchical";
+
+    // Initialize Cytoscape
+    function initCytoscape() {
+      if (!cy) {
+        cy = cytoscape({
+          container: document.getElementById("cy"),
+          style: [
+            {
+              selector: "node",
+              style: {
+                "background-color": "#0f766e",
+                label: "data(label)",
+                "text-opacity": 1,
+                "text-valign": "center",
+                "text-halign": "center",
+                "font-size": "10px",
+                color: "white",
+                width: "40px",
+                height: "40px",
+                "border-width": "2px",
+                "border-color": "#0f766e",
+              },
+            },
+            {
+              selector: "node.entry",
+              style: {
+                "background-color": "white",
+                "border-color": "#0f766e",
+                "border-width": "3px",
+                color: "#0f766e",
+              },
+            },
+            {
+              selector: "node.hidden",
+              style: {
+                display: "none",
+              },
+            },
+            {
+              selector: "edge",
+              style: {
+                "line-color": "#d1d5db",
+                "target-arrow-color": "#d1d5db",
+                "target-arrow-shape": "triangle",
+                width: "2px",
+                "curve-style": "bezier",
+              },
+            },
+            {
+              selector: "edge.cross-file",
+              style: {
+                "line-style": "dashed",
+                "line-color": "#b45309",
+                "target-arrow-color": "#b45309",
+              },
+            },
+            {
+              selector: "edge.same-file",
+              style: {
+                "line-color": "#0f766e",
+                "target-arrow-color": "#0f766e",
+              },
+            },
+            {
+              selector: "edge.hidden",
+              style: {
+                display: "none",
+              },
+            },
+            {
+              selector: "node:selected",
+              style: {
+                "background-color": "#059669",
+                "border-color": "#059669",
+              },
+            },
+          ],
+        });
+
+        // Add event listeners
+        cy.on("tap", "node", function (evt) {
+          const node = evt.target;
+          highlightNode(node);
+        });
+
+        cy.on("tap", function () {
+          clearHighlight();
+        });
+      }
+    }
+
+    function highlightNode(node) {
+      cy.elements().removeClass("highlighted");
+      node.addClass("highlighted");
+
+      const incomers = node.predecessors();
+      const outgoers = node.successors();
+
+      incomers.addClass("highlighted");
+      outgoers.addClass("highlighted");
+
+      incomers.connectedEdges().addClass("highlighted");
+      outgoers.connectedEdges().addClass("highlighted");
+    }
+
+    function clearHighlight() {
+      cy.elements().removeClass("highlighted");
+    }
+
+    // File input handler
+    document.getElementById("jsonFile").addEventListener("change", function (e) {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = function (event) {
+        try {
+          const data = JSON.parse(event.target.result);
+          loadGraph(data);
+        } catch (err) {
+          showError("Invalid JSON: " + err.message);
+        }
+      };
+      reader.readAsText(file);
+    });
+
+    function parseChainSignature(chainSignature) {
+      if (!chainSignature || typeof chainSignature !== "string") return [];
+      const parts = chainSignature.split("|").filter(Boolean);
+      const hops = [];
+
+      for (const part of parts) {
+        const arrowIdx = part.indexOf("->");
+        const atIdx = part.lastIndexOf("@");
+        if (arrowIdx === -1 || atIdx === -1) continue;
+
+        const fromPart = part.slice(0, arrowIdx);
+        const toPart = part.slice(arrowIdx + 2, atIdx);
+        const callLine = Number.parseInt(part.slice(atIdx + 1), 10) || 0;
+
+        const fromSep = fromPart.lastIndexOf("::");
+        const toSep = toPart.lastIndexOf("::");
+        if (fromSep === -1 || toSep === -1) continue;
+
+        hops.push({
+          from_file: fromPart.slice(0, fromSep),
+          from_function: fromPart.slice(fromSep + 2),
+          to_file: toPart.slice(0, toSep),
+          to_function: toPart.slice(toSep + 2),
+          call_line: callLine,
+        });
+      }
+      return hops;
+    }
+
+    function extractAllHops(payload) {
+      const results = payload.results || {};
+      const allHops = [];
+
+      // Source 1: phase3_links (either explicit hops or chain_signature)
+      const phase3Links = results.phase3_links || [];
+      phase3Links.forEach((link) => {
+        const hops = Array.isArray(link.hops) && link.hops.length > 0
+          ? link.hops
+          : parseChainSignature(link.chain_signature);
+        hops.forEach((hop) => allHops.push(hop));
+      });
+
+      // Source 2: correlated findings representative boundary hops
+      const correlated = results.correlated_findings || [];
+      correlated.forEach((item) => {
+        const boundaryHops = item?.representative_finding?.boundary_hops || [];
+        boundaryHops.forEach((hop) => allHops.push(hop));
+      });
+
+      // Source 3: raw agent_1e boundary hops
+      const agent1e = results.agent_1e || [];
+      agent1e.forEach((fileOutput) => {
+        const findings = fileOutput?.taint_findings || [];
+        findings.forEach((finding) => {
+          const boundaryHops = finding?.boundary_hops || [];
+          boundaryHops.forEach((hop) => allHops.push(hop));
+        });
+      });
+
+      return allHops;
+    }
+
+    function loadGraph(payload) {
+      initCytoscape();
+      const callGraphData = payload.results?.call_graph || {};
+      const hops = extractAllHops(payload);
+
+      const nodes = new Map();
+      const edges = new Map();
+      const files = new Set();
+
+      hops.forEach((hop) => {
+        if (!hop?.from_file || !hop?.from_function || !hop?.to_file || !hop?.to_function) {
+          return;
+        }
+        const fromId = `${hop.from_file}::${hop.from_function}`;
+        const toId = `${hop.to_file}::${hop.to_function}`;
+        files.add(hop.from_file);
+        files.add(hop.to_file);
+
+        if (!nodes.has(fromId)) {
+          nodes.set(fromId, { id: fromId, label: hop.from_function, file: hop.from_file });
+        }
+        if (!nodes.has(toId)) {
+          nodes.set(toId, { id: toId, label: hop.to_function, file: hop.to_file });
+        }
+
+        const isCrossFile = hop.from_file !== hop.to_file;
+        const edgeKey = `${fromId}->${toId}@${hop.call_line || 0}`;
+        if (!edges.has(edgeKey)) {
+          edges.set(edgeKey, {
+            source: fromId,
+            target: toId,
+            isCrossFile,
+            line: hop.call_line || 0,
+          });
+        }
+      });
+
+      if (nodes.size === 0 || edges.size === 0) {
+        const available = callGraphData?.available;
+        const availabilityNote =
+          available === false
+            ? " (Phase 3 call graph unavailable in this report)"
+            : "";
+        showError(
+          "No call-chain edges found in report payload. Try a report with cross-file findings enabled." +
+            availabilityNote
+        );
+        return;
+      }
+
+      const incomingCount = {};
+      edges.forEach((edge) => {
+        incomingCount[edge.target] = (incomingCount[edge.target] || 0) + 1;
+      });
+
+      const cyNodes = Array.from(nodes.values()).map((node) => ({
+        data: {
+          id: node.id,
+          label: node.label,
+          file: node.file,
+        },
+        classes: incomingCount[node.id] ? "" : "entry",
+      }));
+
+      const cyEdges = Array.from(edges.values()).map((edge) => ({
+        data: {
+          source: edge.source,
+          target: edge.target,
+          line: edge.line,
+        },
+        classes: edge.isCrossFile ? "cross-file" : "same-file",
+      }));
+
+      cy.elements().remove();
+      cy.add(cyNodes.concat(cyEdges));
+      applyLayout(currentLayout);
+      updateStats(callGraphData, files.size, cyNodes.length, cyEdges);
+
+      document.getElementById("statsContainer").style.display = "block";
+      document.getElementById("emptyState").style.display = "none";
+      document.getElementById("errorMsg").classList.remove("show");
+    }
+
+    function updateStats(callGraphData, fileCount, nodeCount, edges) {
+      const stats = callGraphData.stats || {};
+      const crossFileCount = edges.filter((e) => e.classes === "cross-file").length;
+      document.getElementById("statFunctions").textContent = nodeCount || stats.function_symbols || 0;
+      document.getElementById("statEdges").textContent = edges.length || stats.call_edges || 0;
+      document.getElementById("statCrossFile").textContent = crossFileCount || stats.cross_file_edges || 0;
+      document.getElementById("statFiles").textContent = fileCount || 0;
+    }
+
+    function applyLayout(layoutName) {
+      if (!cy) return;
+
+      currentLayout = layoutName;
+      let layout;
+
+      if (layoutName === "hierarchical") {
+        layout = cy.layout({
+          name: "breadthfirst",
+          directed: true,
+          spacingFactor: 1.5,
+          avoidOverlap: true,
+        });
+      } else if (layoutName === "grid") {
+        layout = cy.layout({
+          name: "grid",
+          avoidOverlap: true,
+          spacingFactor: 1.5,
+        });
+      } else if (layoutName === "circle") {
+        layout = cy.layout({
+          name: "circle",
+          avoidOverlap: true,
+        });
+      }
+
+      try {
+        if (layout) {
+          layout.run();
+        }
+      } catch (err) {
+        showError("Layout failed, falling back to grid: " + err.message);
+        cy.layout({ name: "grid", avoidOverlap: true, spacingFactor: 1.5 }).run();
+      }
+    }
+
+    function changeLayout(layoutName) {
+      applyLayout(layoutName);
+    }
+
+    function fitView() {
+      if (cy) {
+        cy.fit(cy.elements(), 50);
+      }
+    }
+
+    function resetView() {
+      if (cy) {
+        clearHighlight();
+        cy.fit(cy.elements(), 50);
+      }
+    }
+
+    function exportPNG() {
+      if (!cy) {
+        showError("No graph loaded");
+        return;
+      }
+
+      const png = cy.png();
+      const link = document.createElement("a");
+      link.href = png;
+      link.download = "call_graph.png";
+      link.click();
+    }
+
+    function showError(msg) {
+      const errorDiv = document.getElementById("errorMsg");
+      errorDiv.textContent = msg;
+      errorDiv.classList.add("show");
+    }
+  </script>
+</body>
+</html>

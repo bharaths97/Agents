@@ -14,10 +14,11 @@ from agents.agent_1e import Agent1e
 from agents.semgrep_evidence_agent import SemgrepEvidenceAgent
 from config import settings
 from rag import RAGStore
-from schemas.models import Agent1eOutput, ThreatModel
+from schemas.models import Agent1eOutput, CtfArtifacts, ThreatModel, ThreatModelOutput
 from tooling import SemgrepScanResult
-from validation import SchemaValidator
+from validation import FindingsCorrelator, LinkedFindingsResolver, SchemaValidator
 
+from .call_graph import CallGraphIndex
 from .repo_scanner import RepoScanResult, RepoScanner
 
 logger = logging.getLogger(__name__)
@@ -26,12 +27,17 @@ logger = logging.getLogger(__name__)
 @dataclass
 class AnalysisResult:
     scan: RepoScanResult
+    call_graph: Dict[str, Any]
+    phase3_links: List[Dict[str, Any]]
+    correlated_findings: List[Dict[str, Any]]
+    ctf_artifacts: Dict[str, Any]
     agent_1a: Dict[str, Any]
     agent_1b: Dict[str, Any]
     agent_1c: Dict[str, Any]
     semgrep: Dict[str, Any]
     threat_model: Dict[str, Any]
     taint_outputs: List[Dict[str, Any]]
+    token_usage: Dict[str, Any]
     summary: Dict[str, Any]
 
     def to_dict(self) -> Dict[str, Any]:
@@ -39,17 +45,23 @@ class AnalysisResult:
             "scan": {
                 "code_files": [str(p) for p in self.scan.code_files],
                 "context_files": [str(p) for p in self.scan.context_files],
+                "unknown_files": [str(p) for p in self.scan.unknown_files],
                 "detected_languages": self.scan.detected_languages,
                 "detected_frameworks": self.scan.detected_frameworks,
                 "detected_infra": self.scan.detected_infra,
                 "manifests": [str(p) for p in self.scan.manifests],
             },
+            "call_graph": self.call_graph,
+            "phase3_links": self.phase3_links,
+            "correlated_findings": self.correlated_findings,
+            "ctf_artifacts": self.ctf_artifacts,
             "agent_1a": self.agent_1a,
             "agent_1b": self.agent_1b,
             "agent_1c": self.agent_1c,
             "semgrep": self.semgrep,
             "threat_model": self.threat_model,
             "agent_1e": self.taint_outputs,
+            "token_usage": self.token_usage,
             "summary": self.summary,
         }
 
@@ -70,15 +82,60 @@ class TaintAnalystOrchestrator:
             len(scan.context_files),
         )
 
+        call_graph_summary: Dict[str, Any] = {
+            "enabled": settings.phase3_cross_file_enabled,
+            "available": False,
+            "stats": {},
+        }
+        call_graph_index = None
+        if settings.phase3_cross_file_enabled:
+            call_graph_index = CallGraphIndex(
+                max_hops=settings.phase3_call_graph_max_hops,
+                max_chains_per_file=settings.phase3_call_graph_max_chains_per_file,
+            )
+            try:
+                await asyncio.to_thread(call_graph_index.build, self.repo_path, scan.code_files)
+                call_graph_summary = {
+                    "enabled": True,
+                    "available": True,
+                    "stats": call_graph_index.summary(),
+                    "max_hops": settings.phase3_call_graph_max_hops,
+                    "max_chains_per_file": settings.phase3_call_graph_max_chains_per_file,
+                }
+            except Exception as exc:
+                logger.warning("[Orchestrator] Call graph build failed: %s", exc)
+                call_graph_index = None
+                call_graph_summary = {
+                    "enabled": True,
+                    "available": False,
+                    "error": str(exc),
+                    "stats": {},
+                }
+
         rag_store = RAGStore(self._resolve_rag_docs())
         await rag_store.initialize()
 
-        semgrep_agent = SemgrepEvidenceAgent(
-            rules_root=self._resolve_semgrep_rules_root(),
-            repo_path=self.repo_path,
-        )
-        semgrep_result: SemgrepScanResult = await semgrep_agent.run(scan)
-        semgrep_findings_by_file = semgrep_result.findings_by_file()
+        # Initialize empty Semgrep result if disabled
+        if not settings.semgrep_enabled:
+            semgrep_result = SemgrepScanResult(
+                enabled=False,
+                rules_root="",
+                rules_indexed=0,
+                rules_selected=0,
+                findings=[],
+                selection_rationale={},
+                error="",
+            )
+            semgrep_findings_by_file = {}
+            logger.info("[Orchestrator] Semgrep disabled, skipping static analysis")
+        else:
+            semgrep_agent = SemgrepEvidenceAgent(
+                rules_root=self._resolve_semgrep_rules_root(),
+                repo_path=self.repo_path,
+            )
+            semgrep_result: SemgrepScanResult = await semgrep_agent.run(scan)
+            semgrep_findings_by_file = semgrep_result.findings_by_file()
+
         if semgrep_result.error:
             logger.warning("[Orchestrator] Semgrep issue: %s", semgrep_result.error)
         else:
@@ -115,46 +172,103 @@ class TaintAnalystOrchestrator:
             rag_store=rag_store,
             repo_path=self.repo_path,
             semgrep_findings_by_file=semgrep_findings_by_file,
+            call_graph_index=call_graph_index,
         )
 
         task_1e = asyncio.create_task(agent_1e.run(terrain_queue))
-        threat_model = await agent_1d.run(out_1a, out_1b, out_1c, terrain_queue)
-        if threat_model is None:
-            threat_model = ThreatModel(
-                methodology="STRIDE",
-                domain=out_1a.domain,
-                domain_risk_tier=out_1a.domain_risk_tier,
-                regulatory_context=out_1a.regulatory_context,
-                assets=[],
-                trust_boundaries=[],
-                attack_surface=[],
-                stride_analysis=[],
-                prioritized_threat_scenarios=[],
+        threat_bundle = await agent_1d.run(out_1a, out_1b, out_1c, terrain_queue)
+        if threat_bundle is None:
+            threat_bundle = ThreatModelOutput(
+                ctf_artifacts=CtfArtifacts(summary="", hits=[]),
+                threat_model=ThreatModel(
+                    methodology="STRIDE",
+                    domain=out_1a.domain,
+                    domain_risk_tier=out_1a.domain_risk_tier,
+                    regulatory_context=out_1a.regulatory_context,
+                    assets=[],
+                    trust_boundaries=[],
+                    attack_surface=[],
+                    stride_analysis=[],
+                    prioritized_threat_scenarios=[],
+                ),
             )
+        threat_model = threat_bundle.threat_model
         agent_1e.threat_model = threat_model
         out_1e: List[Agent1eOutput] = await task_1e
+
+        agent_token_usage = {
+            "agent_1a": agent_1a.get_token_usage(),
+            "agent_1b": agent_1b.get_token_usage(),
+            "agent_1c": agent_1c.get_token_usage(),
+            "agent_1d": agent_1d.get_token_usage(),
+            "agent_1e": agent_1e.get_token_usage(),
+        }
+        token_usage_totals = {
+            "calls": sum(item.get("calls", 0) for item in agent_token_usage.values()),
+            "prompt_tokens": sum(item.get("prompt_tokens", 0) for item in agent_token_usage.values()),
+            "completion_tokens": sum(
+                item.get("completion_tokens", 0) for item in agent_token_usage.values()
+            ),
+            "total_tokens": sum(item.get("total_tokens", 0) for item in agent_token_usage.values()),
+            "cached_tokens": sum(item.get("cached_tokens", 0) for item in agent_token_usage.values()),
+            "reasoning_tokens": sum(
+                item.get("reasoning_tokens", 0) for item in agent_token_usage.values()
+            ),
+        }
+
+        phase3_links: List[Dict[str, Any]] = []
+        if settings.phase3_cross_file_enabled and call_graph_index is not None:
+            linker = LinkedFindingsResolver()
+            out_1e, phase3_links = linker.link_outputs(out_1e, call_graph_index=call_graph_index)
+
+        correlator = FindingsCorrelator()
+        correlated_findings = correlator.correlate(
+            outputs=out_1e,
+            semgrep_findings_by_file=semgrep_findings_by_file,
+            phase3_links=phase3_links,
+        )
 
         summary = {
             "files_analyzed": len(scan.code_files),
             "context_files_analyzed": len(scan.context_files),
+            "unknown_files": len(scan.unknown_files),
             "insecure_practice_findings": len(out_1b.insecure_practice_findings),
             "logging_findings": len(out_1c.logging_findings),
             "taint_findings": sum(len(item.taint_findings) for item in out_1e),
+            "correlated_findings": len(correlated_findings),
             "threat_scenarios": len(threat_model.prioritized_threat_scenarios),
             "ring1_candidates": self._determine_ring1_candidates(scan),
             "semgrep_rules_selected": semgrep_result.rules_selected,
             "semgrep_findings": len(semgrep_result.findings),
             "semgrep_error": semgrep_result.error,
+            "phase3_cross_file_enabled": settings.phase3_cross_file_enabled,
+            "call_graph_available": bool(call_graph_index),
+            "call_graph_cross_file_edges": (
+                call_graph_summary.get("stats", {}).get("cross_file_edges", 0)
+                if call_graph_summary
+                else 0
+            ),
+            "phase3_linked_observations": len(phase3_links),
+            "agent_token_usage": agent_token_usage,
+            "token_usage_total": token_usage_totals,
         }
 
         return AnalysisResult(
             scan=scan,
+            call_graph=call_graph_summary,
+            phase3_links=phase3_links,
+            correlated_findings=correlated_findings,
+            ctf_artifacts=threat_bundle.ctf_artifacts.model_dump(),
             agent_1a=out_1a.model_dump(),
             agent_1b=out_1b.model_dump(),
             agent_1c=out_1c.model_dump(),
             semgrep=semgrep_result.to_dict(),
             threat_model=threat_model.model_dump(),
             taint_outputs=[item.model_dump() for item in out_1e],
+            token_usage={
+                "per_agent": agent_token_usage,
+                "totals": token_usage_totals,
+            },
             summary=summary,
         )
 
