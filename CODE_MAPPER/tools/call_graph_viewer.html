@@ -457,74 +457,133 @@
       reader.readAsText(file);
     });
 
-    function loadGraph(payload) {
-      initCytoscape();
+    function parseChainSignature(chainSignature) {
+      if (!chainSignature || typeof chainSignature !== "string") return [];
+      const parts = chainSignature.split("|").filter(Boolean);
+      const hops = [];
 
-      const callGraphData = payload.results?.call_graph || {};
-      const phase3Links = payload.results?.phase3_links || [];
+      for (const part of parts) {
+        const arrowIdx = part.indexOf("->");
+        const atIdx = part.lastIndexOf("@");
+        if (arrowIdx === -1 || atIdx === -1) continue;
 
-      if (!callGraphData.available) {
-        showError("Call graph not available in this report");
-        return;
+        const fromPart = part.slice(0, arrowIdx);
+        const toPart = part.slice(arrowIdx + 2, atIdx);
+        const callLine = Number.parseInt(part.slice(atIdx + 1), 10) || 0;
+
+        const fromSep = fromPart.lastIndexOf("::");
+        const toSep = toPart.lastIndexOf("::");
+        if (fromSep === -1 || toSep === -1) continue;
+
+        hops.push({
+          from_file: fromPart.slice(0, fromSep),
+          from_function: fromPart.slice(fromSep + 2),
+          to_file: toPart.slice(0, toSep),
+          to_function: toPart.slice(toSep + 2),
+          call_line: callLine,
+        });
       }
+      return hops;
+    }
 
-      // Build nodes and edges from phase3_links
-      const nodes = new Map();
-      const edges = [];
-      const files = new Set();
+    function extractAllHops(payload) {
+      const results = payload.results || {};
+      const allHops = [];
 
+      // Source 1: phase3_links (either explicit hops or chain_signature)
+      const phase3Links = results.phase3_links || [];
       phase3Links.forEach((link) => {
-        const hops = link.hops || [];
-        let prevNode = null;
+        const hops = Array.isArray(link.hops) && link.hops.length > 0
+          ? link.hops
+          : parseChainSignature(link.chain_signature);
+        hops.forEach((hop) => allHops.push(hop));
+      });
 
-        hops.forEach((hop, idx) => {
-          const fromId = `${hop.from_file}::${hop.from_function}`;
-          const toId = `${hop.to_file}::${hop.to_function}`;
+      // Source 2: correlated findings representative boundary hops
+      const correlated = results.correlated_findings || [];
+      correlated.forEach((item) => {
+        const boundaryHops = item?.representative_finding?.boundary_hops || [];
+        boundaryHops.forEach((hop) => allHops.push(hop));
+      });
 
-          files.add(hop.from_file);
-          files.add(hop.to_file);
-
-          if (!nodes.has(fromId)) {
-            nodes.set(fromId, {
-              id: fromId,
-              label: hop.from_function,
-              file: hop.from_file,
-              isCrossFile: idx > 0,
-            });
-          }
-
-          if (!nodes.has(toId)) {
-            nodes.set(toId, {
-              id: toId,
-              label: hop.to_function,
-              file: hop.to_file,
-              isCrossFile: idx > 0,
-            });
-          }
-
-          const isCrossFile = hop.from_file !== hop.to_file;
-          edges.push({
-            source: fromId,
-            target: toId,
-            isCrossFile,
-            line: hop.call_line,
-          });
-
-          prevNode = toId;
+      // Source 3: raw agent_1e boundary hops
+      const agent1e = results.agent_1e || [];
+      agent1e.forEach((fileOutput) => {
+        const findings = fileOutput?.taint_findings || [];
+        findings.forEach((finding) => {
+          const boundaryHops = finding?.boundary_hops || [];
+          boundaryHops.forEach((hop) => allHops.push(hop));
         });
       });
 
-      // Convert to Cytoscape format
+      return allHops;
+    }
+
+    function loadGraph(payload) {
+      initCytoscape();
+      const callGraphData = payload.results?.call_graph || {};
+      const hops = extractAllHops(payload);
+
+      const nodes = new Map();
+      const edges = new Map();
+      const files = new Set();
+
+      hops.forEach((hop) => {
+        if (!hop?.from_file || !hop?.from_function || !hop?.to_file || !hop?.to_function) {
+          return;
+        }
+        const fromId = `${hop.from_file}::${hop.from_function}`;
+        const toId = `${hop.to_file}::${hop.to_function}`;
+        files.add(hop.from_file);
+        files.add(hop.to_file);
+
+        if (!nodes.has(fromId)) {
+          nodes.set(fromId, { id: fromId, label: hop.from_function, file: hop.from_file });
+        }
+        if (!nodes.has(toId)) {
+          nodes.set(toId, { id: toId, label: hop.to_function, file: hop.to_file });
+        }
+
+        const isCrossFile = hop.from_file !== hop.to_file;
+        const edgeKey = `${fromId}->${toId}@${hop.call_line || 0}`;
+        if (!edges.has(edgeKey)) {
+          edges.set(edgeKey, {
+            source: fromId,
+            target: toId,
+            isCrossFile,
+            line: hop.call_line || 0,
+          });
+        }
+      });
+
+      if (nodes.size === 0 || edges.size === 0) {
+        const available = callGraphData?.available;
+        const availabilityNote =
+          available === false
+            ? " (Phase 3 call graph unavailable in this report)"
+            : "";
+        showError(
+          "No call-chain edges found in report payload. Try a report with cross-file findings enabled." +
+            availabilityNote
+        );
+        return;
+      }
+
+      const incomingCount = {};
+      edges.forEach((edge) => {
+        incomingCount[edge.target] = (incomingCount[edge.target] || 0) + 1;
+      });
+
       const cyNodes = Array.from(nodes.values()).map((node) => ({
         data: {
           id: node.id,
           label: node.label,
           file: node.file,
         },
-        classes: node.isCrossFile ? "entry" : "",
+        classes: incomingCount[node.id] ? "" : "entry",
       }));
 
-      const cyEdges = edges.map((edge) => ({
+      const cyEdges = Array.from(edges.values()).map((edge) => ({
         data: {
           source: edge.source,
           target: edge.target,
@@ -535,25 +594,21 @@
 
       cy.elements().remove();
       cy.add(cyNodes.concat(cyEdges));
-
-      // Apply layout
       applyLayout(currentLayout);
+      updateStats(callGraphData, files.size, cyNodes.length, cyEdges);
 
-      // Update stats
-      updateStats(callGraphData, files.size);
-
-      // Show UI
       document.getElementById("statsContainer").style.display = "block";
       document.getElementById("emptyState").style.display = "none";
       document.getElementById("errorMsg").classList.remove("show");
     }
 
-    function updateStats(callGraphData, fileCount) {
+    function updateStats(callGraphData, fileCount, nodeCount, edges) {
       const stats = callGraphData.stats || {};
-      document.getElementById("statFunctions").textContent = stats.function_symbols || 0;
-      document.getElementById("statEdges").textContent = stats.call_edges || 0;
-      document.getElementById("statCrossFile").textContent = stats.cross_file_edges || 0;
-      document.getElementById("statFiles").textContent = fileCount;
+      const crossFileCount = edges.filter((e) => e.classes === "cross-file").length;
+      document.getElementById("statFunctions").textContent = nodeCount || stats.function_symbols || 0;
+      document.getElementById("statEdges").textContent = edges.length || stats.call_edges || 0;
+      document.getElementById("statCrossFile").textContent = crossFileCount || stats.cross_file_edges || 0;
+      document.getElementById("statFiles").textContent = fileCount || 0;
     }
 
     function applyLayout(layoutName) {
@@ -564,7 +619,7 @@
 
       if (layoutName === "hierarchical") {
         layout = cy.layout({
-          name: "breadthFirstLayout",
+          name: "breadthfirst",
           directed: true,
           spacingFactor: 1.5,
           avoidOverlap: true,
@@ -582,8 +637,13 @@
         });
       }
 
-      if (layout) {
-        layout.run();
+      try {
+        if (layout) {
+          layout.run();
+        }
+      } catch (err) {
+        showError("Layout failed, falling back to grid: " + err.message);
+        cy.layout({ name: "grid", avoidOverlap: true, spacingFactor: 1.5 }).run();
       }
     }
 

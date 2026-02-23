@@ -6,7 +6,7 @@ class Settings(BaseSettings):
     openai_base_url: str | None = None
     openai_organization: str | None = None
     openai_project: str | None = None
-    openai_model: str = "gpt-4o"
+    openai_model: str = "gpt-5-nano"
     openai_embedding_model: str = "text-embedding-3-small"
     log_level: str = "INFO"
     max_tokens_per_chunk: int = 8000
@@ -14,6 +14,10 @@ class Settings(BaseSettings):
     min_confidence_reasons: int = 2
     auto_downgrade_high_severity: bool = True
     rag_docs_path: str = "rag/docs"
+    repo_url: str = ""
+    repo_branch: str = ""
+    repo_commit: str = ""
+    refresh_clone: bool = False
     semgrep_enabled: bool = True
     semgrep_binary: str = "semgrep"
     semgrep_app_token: str = ""

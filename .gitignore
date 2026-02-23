@@ -14,9 +14,11 @@
 
 # CODE_MAPPER local runtime artifacts
 CODE_MAPPER/output/
+OUTS
 
 # CODE_MAPPER local documentation workspace (intentionally local-only)
 CODE_MAPPER/docs/
+CODE_MAPPER/docs/setup
 
 # Local tooling metadata
 .claude/
