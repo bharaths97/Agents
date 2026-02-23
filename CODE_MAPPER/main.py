@@ -150,6 +150,7 @@ def _write_debug_dump(result: object, output_dir: Path, base_stem: str) -> Path:
 
     # Stage 5 — CTF artifacts
     dump("10_ctf_artifacts.json", result.ctf_artifacts)  # type: ignore[attr-defined]
+    dump("11_token_usage.json", result.token_usage)  # type: ignore[attr-defined]
 
     return debug_dir
 
