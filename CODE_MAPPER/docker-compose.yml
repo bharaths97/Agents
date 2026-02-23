@@ -7,19 +7,23 @@ services:
       dockerfile: Dockerfile
     volumes:
       - ${REPO_PATH:-.}:/repo:ro               # Mount target repo (read-only)
-      - ${SEMGREP_RULES_PATH:-./semgrep-rules}:/semgrep-rules:ro
       - ./output:/app/output                    # Analysis output
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.openai.com/v1}
       - OPENAI_ORGANIZATION=${OPENAI_ORGANIZATION:-}
       - OPENAI_PROJECT=${OPENAI_PROJECT:-}
-      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-5-nano}
       - OPENAI_EMBEDDING_MODEL=${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - MAX_TOKENS_PER_CHUNK=${MAX_TOKENS_PER_CHUNK:-8000}
       - CONCURRENT_FILE_WORKERS=${CONCURRENT_FILE_WORKERS:-3}
       - RAG_DOCS_PATH=${RAG_DOCS_PATH:-rag/docs}
+      - REPO_URL=${REPO_URL:-}
+      - DEBUG_DUMP=${DEBUG_DUMP}
+      - REPO_BRANCH=${REPO_BRANCH:-}
+      - REPO_COMMIT=${REPO_COMMIT:-}
+      - REFRESH_CLONE=${REFRESH_CLONE:-false}
       - SEMGREP_ENABLED=${SEMGREP_ENABLED:-true}
       - SEMGREP_BINARY=${SEMGREP_BINARY:-semgrep}
       - SEMGREP_APP_TOKEN=${SEMGREP_APP_TOKEN:-}
@@ -31,28 +35,26 @@ services:
       - PHASE3_CROSS_FILE_ENABLED=${PHASE3_CROSS_FILE_ENABLED:-false}
       - PHASE3_CALL_GRAPH_MAX_HOPS=${PHASE3_CALL_GRAPH_MAX_HOPS:-5}
       - PHASE3_CALL_GRAPH_MAX_CHAINS_PER_FILE=${PHASE3_CALL_GRAPH_MAX_CHAINS_PER_FILE:-20}
-      - REPO_URL=${REPO_URL:-}
-      - REPO_BRANCH=${REPO_BRANCH:-}
-      - REPO_COMMIT=${REPO_COMMIT:-}
-      - REFRESH_CLONE=${REFRESH_CLONE:-}
     env_file:
       - .env
-    command:
+    entrypoint:
       - "sh"
-      - "-lc"
-      - >-
+      - "-c"
+    command:
+      - |
+        set -e
         if [ -n "$REPO_URL" ]; then
-          python main.py
-          --repo-url "$REPO_URL"
-          ${REPO_BRANCH:+--repo-branch "$REPO_BRANCH"}
-          ${REPO_COMMIT:+--repo-commit "$REPO_COMMIT"}
-          ${REFRESH_CLONE:+--refresh-clone}
-          --output-dir /app/output
-          --model "${OPENAI_MODEL:-gpt-4o}";
+          BRANCH_ARG=""
+          if [ -n "$REPO_BRANCH" ]; then
+            BRANCH_ARG="--repo-branch $REPO_BRANCH"
+          fi
+          DUMP_ARG=""
+          if [ -n "$DEBUG_DUMP" ]; then
+            DUMP_ARG="--debug-dump"
+          fi
+          exec python main.py --repo-url "$REPO_URL" $BRANCH_ARG --output-dir /app/output --model "$OPENAI_MODEL" $DUMP_ARG
         else
-          python main.py
-          --repo-path /repo
-          --output-dir /app/output
-          --model "${OPENAI_MODEL:-gpt-4o}";
+          exec python main.py --repo-path /repo --output-dir /app/output --model "$OPENAI_MODEL"
         fi
+
     restart: "no"
