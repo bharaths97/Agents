@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CODE_MAPPER Security Report</title>
+  <style>
+    :root {
+      --bg: #f5f7fb;
+      --panel: #ffffff;
+      --text: #1f2937;
+      --muted: #6b7280;
+      --border: #d1d5db;
+      --accent: #0f766e;
+      --critical: #b91c1c;
+      --high: #b45309;
+      --medium: #1d4ed8;
+      --low: #4b5563;
+    }
+    body { margin: 0; background: var(--bg); color: var(--text); font-family: "Segoe UI", Tahoma, sans-serif; }
+    main { max-width: 1080px; margin: 0 auto; padding: 24px; }
+    h1, h2, h3 { margin: 0 0 12px 0; }
+    section { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; border-bottom: 1px solid var(--border); padding: 8px; vertical-align: top; }
+    code { background: #eef2ff; padding: 2px 4px; border-radius: 4px; }
+    pre { background: #0b1020; color: #f9fafb; padding: 10px; border-radius: 6px; overflow-x: auto; }
+    .meta { color: var(--muted); font-size: 0.95rem; }
+    .sev-CRITICAL { color: var(--critical); font-weight: 700; }
+    .sev-HIGH { color: var(--high); font-weight: 700; }
+    .sev-MEDIUM { color: var(--medium); font-weight: 700; }
+    .sev-LOW { color: var(--low); font-weight: 700; }
+  </style>
+</head>
+<body>
+  <main>
+    <section>
+      <h1>CODE_MAPPER Security Report</h1>
+      <p class="meta">Generated: 2026-02-23T09:57:36.226753+00:00<br />
+      Repository: <code>/app/output/.repo_cache/go-sqlite3-ext-3fffa3bbb93e</code><br />
+      Model: <code>gpt-5-mini</code></p>
+      <p><strong>Domain:</strong> A small C extension library project intended to build/install go-sqlite3 extensions (go-sqlite3-ext) |
+      <strong>Risk Tier:</strong> <code>LOW</code> |
+      <strong>Correlated Findings:</strong> 3</p>
+    </section>
+
+    <section>
+      <h2>Top Threat Scenarios</h2>
+      <ul><li><strong>TS-001</strong> (rank 1, risk HIGH): Native extension load leads to in-process code execution</li><li><strong>TS-002</strong> (rank 2, risk HIGH): SQL functions exfiltrate sensitive file contents</li><li><strong>TS-003</strong> (rank 3, risk MEDIUM): Arbitrary filesystem modification via writefile</li></ul>
+    </section>
+
+    <section>
+      <h2>Findings by Severity</h2>
+      <table>
+        <thead><tr><th>Severity</th><th>Count</th></tr></thead>
+        <tbody><tr><td>CRITICAL</td><td>0</td></tr><tr><td>HIGH</td><td>2</td></tr><tr><td>MEDIUM</td><td>1</td></tr><tr><td>LOW</td><td>0</td></tr></tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Correlated Findings</h2>
+      <article style="border:1px solid #d1d5db;border-radius:8px;padding:12px;margin-bottom:12px;"><h3>CF-001 <span class="sev-HIGH">HIGH</span> Arbitrary file read / information exposure (sensitive file contents returned to SQL caller)</h3><p><strong>CWE:</strong> <code>CWE-200</code> | <strong>Confidence:</strong> 0.47 | <strong>Rank:</strong> 90.63</p><p><strong>Files:</strong> <code>/app/output/.repo_cache/go-sqlite3-ext-3fffa3bbb93e/src/fileio.c</code><br /><strong>Source -&gt; Sink:</strong> line 199 -&gt; line 177 (readFileContents / sqlite3_result_blob64)</p><p><strong>Source Agents:</strong> 1E</p><h4>Taint Path</h4><ul><li>Line 199 (/app/output/.repo_cache/go-sqlite3-ext-3fffa3bbb93e/src/fileio.c): zName = (const char *)sqlite3_value_text(argv[0]);</li><li>Line 151 (/app/output/.repo_cache/go-sqlite3-ext-3fffa3bbb93e/src/fileio.c): in = sqlite3_fopen(zName, &quot;rb&quot;);</li><li>Line 175 (/app/output/.repo_cache/go-sqlite3-ext-3fffa3bbb93e/src/fileio.c): if (nIn == (sqlite3_int64)fread(pBuf, 1, (size_t)nIn, in)) {</li><li>Line 177 (/app/output/.repo_cache/go-sqlite3-ext-3fffa3bbb93e/src/fileio.c): sqlite3_result_blob64(ctx, pBuf, nIn, sqlite3_free);</li></ul><p><strong>Exploit Scenario:</strong> An attacker able to execute SQL could call SELECT readfile(&#x27;/etc/passwd&#x27;) or readfile(&#x27;/var/lib/app/secrets.json&#x27;) and receive file contents as a BLOB, enabling sensitive data exfiltration.</p><p><strong>Remediation:</strong> Enforce an allowlist of permitted base directories and canonicalize the path before opening. Example C mitigation: char *real = realpath(zName, NULL); if (real == NULL) { sqlite3_result_error(ctx, &quot;invalid path&quot;, -1); return; } if (strncmp(real, ALLOWED_BASE, strlen(ALLOWED_BASE))!=0){ sqlite3_free(real); sqlite3_result_error(ctx, &quot;path not allowed&quot;, -1); return; } /* use real for sqlite3_fopen */ sqlite3_free(real);
+Alternatively, remove readfile() from builds where arbitrary SQL is accepted, or require configuration to opt-in explicit trusted directories.</p></article><article style="border:1px solid #d1d5db;border-radius:8px;padding:12px;margin-bottom:12px;"><h3>CF-002 <span class="sev-HIGH">HIGH</span> Arbitrary file write / path control (insufficient path validation leading to arbitrary file creation/modification)</h3><p><strong>CWE:</strong> <code>CWE-22</code> | <strong>Confidence:</strong> 0.47 | <strong>Rank:</strong> 90.63</p><p><strong>Files:</strong> <code>/app/output/.repo_cache/go-sqlite3-ext-3fffa3bbb93e/src/fileio.c</code><br /><strong>Source -&gt; Sink:</strong> line 552 -&gt; line 436 (writeFile (sqlite3_fopen/fwrite/symlink/chmod/utimes/mkdir/unlink))</p><p><strong>Source Agents:</strong> 1E</p><h4>Taint Path</h4><ul><li>Line 552 (/app/output/.repo_cache/go-sqlite3-ext-3fffa3bbb93e/src/fileio.c): zFile = (const char *)sqlite3_value_text(argv[0]);</li><li>Line 564 (/app/output/.repo_cache/go-sqlite3-ext-3fffa3bbb93e/src/fileio.c): res = writeFile(context, zFile, argv[1], mode, mtime);</li><li>Line 436 (/app/output/.repo_cache/go-sqlite3-ext-3fffa3bbb93e/src/fileio.c): FILE *out = sqlite3_fopen(zFile, &quot;wb&quot;); (write target opened from zFile)</li><li>Line 442 (/app/output/.repo_cache/go-sqlite3-ext-3fffa3bbb93e/src/fileio.c): sqlite3_int64 n = fwrite(z, 1, sqlite3_value_bytes(pData), out); (blob from SQL written to file at zFile)</li><li>Line 410 (/app/output/.repo_cache/go-sqlite3-ext-3fffa3bbb93e/src/fileio.c): if (symlink(zTo, zFile) &lt; 0) return 1; (symlink creation using attacker-supplied target and path)</li><li>Line 450 (/app/output/.repo_cache/go-sqlite3-ext-3fffa3bbb93e/src/fileio.c): if (rc == 0 &amp;&amp; mode &amp;&amp; chmod(zFile, mode &amp; 0777)) { rc = 1; } (permissions applied to attacker-controlled path)</li></ul><p><strong>Exploit Scenario:</strong> An attacker who can execute SQL using this extension can call writefile(&#x27;/etc/cron.d/evil&#x27;, X, 0100644) to write a persistent job, create symlinks to escalate file access, or overwrite application configuration files the process can write, leading to tampering or privilege escalation.</p><p><strong>Remediation:</strong> Validate and canonicalize the target path before any file operations. Example C mitigation: char *real = realpath(zFile, NULL); if(real==NULL){ ctxErrorMsg(pCtx, &quot;invalid path&quot;); return 1;} if(strncmp(real, ALLOWED_BASE, strlen(ALLOWED_BASE))!=0){ sqlite3_free(real); ctxErrorMsg(pCtx, &quot;path not allowed: %s&quot;, zFile); return 1;} /* then use &#x27;real&#x27; for fopen/chmod; disallow S_ISLNK creation unless explicitly allowed */ sqlite3_free(real);
+Additionally, consider removing dangerous operations (symlink creation, arbitrary chmod/utimes) or restrict them to configuration-time whitelisted directories; enforce least privilege at the OS level and document that the extension must not be used in contexts accepting untrusted SQL.</p></article><article style="border:1px solid #d1d5db;border-radius:8px;padding:12px;margin-bottom:12px;"><h3>CF-003 <span class="sev-MEDIUM">MEDIUM</span> Directory traversal / information exposure (fsdir enumerates and returns filesystem metadata and file contents without restriction)</h3><p><strong>CWE:</strong> <code>CWE-200</code> | <strong>Confidence:</strong> 0.47 | <strong>Rank:</strong> 71.63</p><p><strong>Files:</strong> <code>/app/output/.repo_cache/go-sqlite3-ext-3fffa3bbb93e/src/fileio.c</code><br /><strong>Source -&gt; Sink:</strong> line 823 -&gt; line 911 (fsdirColumn / readFileContents)</p><p><strong>Source Agents:</strong> 1E</p><h4>Taint Path</h4><ul><li>Line 823 (/app/output/.repo_cache/go-sqlite3-ext-3fffa3bbb93e/src/fileio.c): pCur-&gt;zPath = sqlite3_mprintf(&quot;%s/%s&quot;, pLvl-&gt;zDir, pEntry-&gt;d_name); (path built from input dir/base and directory entry)</li><li>Line 826 (/app/output/.repo_cache/go-sqlite3-ext-3fffa3bbb93e/src/fileio.c): if (fileLinkStat(pCur-&gt;zPath, &amp;pCur-&gt;sStat)) { ... } (lstat/stat used to classify entry)</li><li>Line 911 (/app/output/.repo_cache/go-sqlite3-ext-3fffa3bbb93e/src/fileio.c): readFileContents(ctx, pCur-&gt;zPath); (regular file contents returned to SQL caller)</li></ul><p><strong>Exploit Scenario:</strong> An attacker can instantiate the fsdir virtual table with a path parameter pointing at a system directory and run SELECT queries to enumerate files and retrieve file contents (e.g., SELECT data FROM fsdir(&#x27;/etc&#x27;);), enabling large-scale information disclosure.</p><p><strong>Remediation:</strong> Restrict fsdir to a configured allowlist of base directories and canonicalize constructed paths before use. Example fix: char *real = realpath(pCur-&gt;zPath, NULL); if(!real || strncmp(real, ALLOWED_BASE, strlen(ALLOWED_BASE))!=0){ sqlite3_result_error(ctx, &quot;path not allowed&quot;, -1); sqlite3_free(real); return; } /* then call readFileContents on real */ sqlite3_free(real);
+Also consider adding an opt-in configuration flag to enable fsdir only in trusted/admin contexts, and document risks.</p></article>
+    </section>
+
+    <section>
+      <h2>STRIDE Threat Model</h2>
+      <ul>
+        <li>Assets: 4</li>
+        <li>Trust Boundaries: 2</li>
+        <li>Attack Surface Entries: 4</li>
+        <li>STRIDE Entries: 6</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>CTF Artifacts</h2>
+      <p></p>
+      <ul><li>No CTF artifacts found.</li></ul>
+    </section>
+  </main>
+</body>
+</html>
