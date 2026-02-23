@@ -1,7 +1,6 @@
 """Test Agent1a (Context & Domain Reader)."""
 import pytest
-import json
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 from agents.agent_1a import Agent1a
 
 
@@ -51,7 +50,7 @@ async def test_agent_1a_reads_readme(fixture_repo_py_simple_sqli, mock_openai_cl
 
     assert result.domain == "web application"
     assert result.domain_risk_tier == "HIGH"
-    assert result.publicly_exposed is True
+    assert result.deployment_context.publicly_exposed is True
 
 
 @pytest.mark.asyncio
@@ -68,7 +67,7 @@ async def test_agent_1a_hipaa_context(fixture_repo_hipaa_context):
         "data_handled": [
             {
                 "data_type": "PHI",
-                "sensitivity": "CRITICAL",
+                "sensitivity": "PHI",
                 "notes": "Patient health records"
             }
         ],

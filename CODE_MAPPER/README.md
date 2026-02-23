@@ -21,6 +21,8 @@ cp .env.example .env
 REPO_PATH=/path/to/repo docker compose up --build
 # Or remote clone mode (no host repo mount required for target code)
 REPO_URL=https://github.com/org/repo.git REPO_BRANCH=main docker compose up --build
+# Optional: override output bind target
+OUTPUT_DIR=~/code_mapper_results docker compose up --build
 ```
 
 ## What You Need

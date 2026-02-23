@@ -38,6 +38,11 @@ PASS1_SYSTEM_PROMPT = (
 CALL MODE: PASS 1 — STRUCTURAL FLOW MAPPING
 ════════════════════════════════════════════════════════════════
 
+NOTE ON SOURCE CODE: The source code below is provided as focused excerpts around known
+source and sink line numbers (±30 lines each), plus the file header. Line numbers are
+labeled on each section. The file may contain additional code not shown — use the
+call graph hints for cross-file context and flows beyond the shown excerpts.
+
 You are performing PASS 1 ONLY. Do NOT assess vulnerabilities. Do NOT emit taint findings.
 Your only task: enumerate every source → sink path and map the transformation chain.
 
@@ -86,6 +91,8 @@ Output ONLY the full Agent 1e JSON object per the schema in your instructions ab
 )
 
 MAX_FILE_CHARS = 24_000
+FOCUSED_SOURCE_MIN_COVERAGE = 0.18
+FOCUSED_SOURCE_MAX_FULLFILE_FALLBACK_LINES = 1200
 MAX_STRUCTURED_CHAIN_MATCHES = 4
 MIN_CHAIN_MATCH_SCORE = 2
 CHAIN_CONFIDENCE_DECAY_PER_HOP = 0.04
@@ -160,8 +167,8 @@ class Agent1e(BaseAgent):
                 low_confidence_observations=[],
             )
 
-        # Read the actual source file (Agent 1e has code access)
-        source_code = await self._read_source_file(terrain.file)
+        # Read focused source excerpts around known source/sink lines
+        source_code = await self._read_focused_source(terrain.file, terrain)
 
         rag_context = await self.retrieve_references(
             f"SQL injection command injection path traversal XSS taint analysis "
@@ -791,7 +798,7 @@ Output ONLY the full JSON object per the schema.
         return False
 
     async def _read_source_file(self, file_path: str) -> str:
-        """Read the actual source file from disk."""
+        """Read the actual source file from disk (full file, fallback)."""
         try:
             target = Path(file_path)
             if not target.is_absolute() and self.repo_path:
@@ -804,3 +811,91 @@ Output ONLY the full JSON object per the schema.
         except Exception as exc:
             logger.warning(f"[{self.name}] Could not read source for {file_path}: {exc}")
             return f"[Source code unavailable: {exc}]"
+
+    async def _read_focused_source(self, file_path: str, terrain: TerrainObject) -> str:
+        """Read only the code sections relevant to known sources and sinks.
+
+        Uses terrain.sources[*].line and terrain.sinks[*].line as anchors,
+        extracts ±30 lines around each anchor plus the file header (imports/globals).
+        Falls back to full file read if no line information is available.
+        The call graph hints cover cross-file context beyond the shown excerpts.
+        """
+        # Collect anchor line numbers from terrain
+        anchor_lines: set[int] = set()
+        for src in terrain.sources:
+            if src.line > 0:
+                anchor_lines.add(src.line)
+        for sink in terrain.sinks:
+            if sink.line > 0:
+                anchor_lines.add(sink.line)
+
+        # Fallback to full file if no line info available
+        if not anchor_lines:
+            return await self._read_source_file(file_path)
+
+        # Read full file as lines
+        try:
+            target = Path(file_path)
+            if not target.is_absolute() and self.repo_path:
+                target = self.repo_path / file_path
+            async with aiofiles.open(target, "r", encoding="utf-8", errors="replace") as f:
+                all_lines = await f.readlines()
+        except Exception as exc:
+            logger.warning(f"[{self.name}] Could not read source for {file_path}: {exc}")
+            return f"[Source code unavailable: {exc}]"
+
+        total_lines = len(all_lines)
+        WINDOW = 30       # lines around each anchor (captures full function body)
+        HEADER_LINES = 20  # always include top of file (imports, globals, class defs)
+
+        # Build ranges to include
+        ranges: List[tuple[int, int]] = [(0, min(HEADER_LINES, total_lines))]
+        for anchor in anchor_lines:
+            start = max(0, anchor - WINDOW - 1)
+            end = min(total_lines, anchor + WINDOW)
+            ranges.append((start, end))
+
+        # Merge overlapping/adjacent ranges
+        ranges.sort()
+        merged: List[tuple[int, int]] = []
+        for start, end in ranges:
+            if merged and start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+
+        # Build focused source with labeled sections preserving line numbers
+        sections: List[str] = []
+        for start, end in merged:
+            label = f"# Lines {start + 1}–{end}"
+            section_lines = all_lines[start:end]
+            sections.append(label + "\n" + "".join(section_lines))
+
+        focused = "\n\n".join(sections)
+
+        # Enforce char limit
+        if len(focused) > MAX_FILE_CHARS:
+            focused = focused[:MAX_FILE_CHARS] + "\n\n[...truncated...]"
+
+        lines_included = sum(e - s for s, e in merged)
+        coverage = (lines_included / total_lines) if total_lines > 0 else 1.0
+        low_coverage = coverage < FOCUSED_SOURCE_MIN_COVERAGE
+        if low_coverage and total_lines <= FOCUSED_SOURCE_MAX_FULLFILE_FALLBACK_LINES:
+            logger.debug(
+                "[%s] Focused source coverage %.2f too low for %s, using full file fallback",
+                self.name,
+                coverage,
+                Path(file_path).name,
+            )
+            return await self._read_source_file(file_path)
+
+        logger.debug(
+            "[%s] Focused source: %d anchors → %d/%d lines (%.2f coverage) for %s",
+            self.name,
+            len(anchor_lines),
+            lines_included,
+            total_lines,
+            coverage,
+            Path(file_path).name,
+        )
+        return focused

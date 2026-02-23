@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import ast
+import json
 import logging
 import re
+import threading
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
@@ -88,6 +91,11 @@ class CallGraphIndex:
     The index is intentionally conservative: it targets common function patterns
     in Python/JS/TS and avoids speculative linking when multiple definitions
     are highly ambiguous.
+
+    Optimizations:
+    - Phase 1: Parallel file parsing via ThreadPoolExecutor
+    - Phase 2: Tree-sitter AST parsing for JS/TS (falls back to regex)
+    - Phase 3: Incremental caching via .cache/call_graph.json
     """
 
     def __init__(self, max_hops: int = 5, max_chains_per_file: int = 20):
@@ -106,6 +114,8 @@ class CallGraphIndex:
             "call_edges": 0,
             "cross_file_edges": 0,
         }
+        # Lock for thread-safe symbol registration (Phase 1)
+        self._lock = threading.Lock()
 
     def build(self, repo_path: Path, code_files: List[Path]) -> None:
         self.repo_path = repo_path
@@ -121,12 +131,99 @@ class CallGraphIndex:
             "cross_file_edges": 0,
         }
 
-        for file_path in code_files:
-            suffix = file_path.suffix.lower()
-            if suffix in PYTHON_EXTENSIONS:
-                self._index_python_file(file_path)
-            elif suffix in JS_TS_EXTENSIONS:
-                self._index_js_ts_file(file_path)
+        # ------------------------------------------------------------------
+        # Phase 3: Load cache and determine which files need re-parsing
+        # ------------------------------------------------------------------
+        cache_file = repo_path / ".cache" / "call_graph.json"
+        cache_mtime: Optional[float] = None
+        current_files_set = {
+            str(path.resolve())
+            for path in code_files
+            if path.suffix.lower() in (PYTHON_EXTENSIONS | JS_TS_EXTENSIONS)
+        }
+
+        if cache_file.exists():
+            try:
+                cached_data = json.loads(cache_file.read_text(encoding="utf-8"))
+                # Restore cached symbols
+                for sym_data in cached_data.get("symbols", {}).values():
+                    symbol = FunctionSymbol(
+                        symbol_id=sym_data["symbol_id"],
+                        file=sym_data["file"],
+                        function_name=sym_data["function_name"],
+                        line=sym_data["line"],
+                        parameters=sym_data["parameters"],
+                        language=sym_data["language"],
+                        calls=[
+                            CallSite(
+                                function_name=c["function_name"],
+                                line=c["line"],
+                                args=c["args"],
+                            )
+                            for c in sym_data.get("calls", [])
+                        ],
+                    )
+                    self._register_symbol(symbol)
+                cache_mtime = cache_file.stat().st_mtime
+                logger.info("[CallGraphIndex] Loaded cache from %s", cache_file)
+            except Exception as exc:
+                logger.warning("[CallGraphIndex] Cache load failed (%s), rebuilding", exc)
+                self.symbols_by_id.clear()
+                self.symbols_by_name.clear()
+                self.symbols_by_file.clear()
+                cache_mtime = None
+
+        # Filter to only files changed since cache was written
+        if cache_mtime is not None:
+            files_to_parse = []
+            for file_path in code_files:
+                if file_path.suffix.lower() not in (PYTHON_EXTENSIONS | JS_TS_EXTENSIONS):
+                    continue
+                try:
+                    if file_path.stat().st_mtime > cache_mtime:
+                        files_to_parse.append(file_path)
+                except OSError:
+                    files_to_parse.append(file_path)
+            if files_to_parse:
+                logger.info(
+                    "[CallGraphIndex] %d/%d files changed since cache, re-parsing",
+                    len(files_to_parse),
+                    len(code_files),
+                )
+            else:
+                logger.info("[CallGraphIndex] No files changed, using cache as-is")
+        else:
+            files_to_parse = [
+                path for path in code_files if path.suffix.lower() in (PYTHON_EXTENSIONS | JS_TS_EXTENSIONS)
+            ]
+
+        # Invalidate stale cache entries for changed or deleted files.
+        # Without this, changed files can retain old symbols and create stale edges.
+        files_to_reparse_set = {str(path.resolve()) for path in files_to_parse}
+        cached_files_set = {symbol.file for symbol in self.symbols_by_id.values()}
+        files_deleted_since_cache = cached_files_set - current_files_set
+        files_to_invalidate = files_to_reparse_set.union(files_deleted_since_cache)
+        if files_to_invalidate:
+            self._drop_symbols_for_files(files_to_invalidate)
+
+        # ------------------------------------------------------------------
+        # Phase 1: Parse files in parallel via ThreadPoolExecutor
+        # ------------------------------------------------------------------
+        if files_to_parse:
+            max_workers = min(8, max(1, len(files_to_parse)))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = []
+                for file_path in files_to_parse:
+                    suffix = file_path.suffix.lower()
+                    if suffix in PYTHON_EXTENSIONS:
+                        futures.append(executor.submit(self._index_python_file, file_path))
+                    elif suffix in JS_TS_EXTENSIONS:
+                        futures.append(executor.submit(self._index_js_ts_file, file_path))
+
+                for future in as_completed(futures):
+                    exc = future.exception()
+                    if exc:
+                        logger.debug("[CallGraphIndex] Worker error: %s", exc)
 
         self._resolve_edges()
         self._stats["function_symbols"] = len(self.symbols_by_id)
@@ -145,6 +242,33 @@ class CallGraphIndex:
             self._stats["call_edges"],
             self._stats["cross_file_edges"],
         )
+
+        # ------------------------------------------------------------------
+        # Phase 3: Save updated cache
+        # ------------------------------------------------------------------
+        try:
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            serialized = {
+                sym_id: {
+                    "symbol_id": sym.symbol_id,
+                    "file": sym.file,
+                    "function_name": sym.function_name,
+                    "line": sym.line,
+                    "parameters": sym.parameters,
+                    "language": sym.language,
+                    "calls": [
+                        {"function_name": c.function_name, "line": c.line, "args": c.args}
+                        for c in sym.calls
+                    ],
+                }
+                for sym_id, sym in self.symbols_by_id.items()
+            }
+            cache_file.write_text(
+                json.dumps({"symbols": serialized}, indent=2), encoding="utf-8"
+            )
+            logger.info("[CallGraphIndex] Saved cache to %s", cache_file)
+        except Exception as exc:
+            logger.warning("[CallGraphIndex] Cache save failed: %s", exc)
 
     def summary(self) -> Dict[str, Any]:
         return dict(self._stats)
@@ -211,7 +335,8 @@ class CallGraphIndex:
     # ------------------------------------------------------------------
 
     def _index_python_file(self, file_path: Path) -> None:
-        self._stats["files_scanned"] += 1
+        with self._lock:
+            self._stats["files_scanned"] += 1
         resolved = file_path.resolve()
         try:
             text = resolved.read_text(encoding="utf-8", errors="replace")
@@ -226,22 +351,31 @@ class CallGraphIndex:
             self._register_symbol(symbol)
 
     def _index_js_ts_file(self, file_path: Path) -> None:
-        self._stats["files_scanned"] += 1
+        with self._lock:
+            self._stats["files_scanned"] += 1
         resolved = file_path.resolve()
+        suffix = resolved.suffix.lower()
         try:
             text = resolved.read_text(encoding="utf-8", errors="replace")
         except Exception as exc:
             logger.debug("[CallGraphIndex] JS/TS read failed for %s: %s", file_path, exc)
             return
 
-        symbols = _parse_js_ts_symbols(str(resolved), text)
+        # ------------------------------------------------------------------
+        # Phase 2: Try tree-sitter first, fall back to regex
+        # ------------------------------------------------------------------
+        symbols = _parse_js_ts_treesitter(str(resolved), text, suffix=suffix)
+        if symbols is None:
+            symbols = _parse_js_ts_symbols(str(resolved), text)
+
         for symbol in symbols:
             self._register_symbol(symbol)
 
     def _register_symbol(self, symbol: FunctionSymbol) -> None:
-        self.symbols_by_id[symbol.symbol_id] = symbol
-        self.symbols_by_name[symbol.function_name].append(symbol.symbol_id)
-        self.symbols_by_file[symbol.file].append(symbol.symbol_id)
+        with self._lock:
+            self.symbols_by_id[symbol.symbol_id] = symbol
+            self.symbols_by_name[symbol.function_name].append(symbol.symbol_id)
+            self.symbols_by_file[symbol.file].append(symbol.symbol_id)
 
     def _resolve_edges(self) -> None:
         for caller in self.symbols_by_id.values():
@@ -366,6 +500,190 @@ class CallGraphIndex:
             path = (self.repo_path / path).resolve()
         return str(path)
 
+    def _drop_symbols_for_files(self, file_paths: Set[str]) -> None:
+        if not file_paths:
+            return
+        self.symbols_by_id = {
+            symbol_id: symbol
+            for symbol_id, symbol in self.symbols_by_id.items()
+            if symbol.file not in file_paths
+        }
+        self._rebuild_symbol_indexes()
+
+    def _rebuild_symbol_indexes(self) -> None:
+        symbols_by_name: Dict[str, List[str]] = defaultdict(list)
+        symbols_by_file: Dict[str, List[str]] = defaultdict(list)
+        for symbol_id, symbol in self.symbols_by_id.items():
+            symbols_by_name[symbol.function_name].append(symbol_id)
+            symbols_by_file[symbol.file].append(symbol_id)
+        self.symbols_by_name = symbols_by_name
+        self.symbols_by_file = symbols_by_file
+
+
+# ------------------------------------------------------------------
+# Phase 2: Tree-sitter JS/TS parser
+# Returns None if tree-sitter is not available (triggers regex fallback)
+# ------------------------------------------------------------------
+
+def _parse_js_ts_treesitter(
+    file: str,
+    source: str,
+    suffix: str,
+) -> Optional[List[FunctionSymbol]]:
+    """Parse JS/TS using tree-sitter for full AST coverage. Returns None if unavailable."""
+    try:
+        from tree_sitter import Language, Parser  # type: ignore
+    except ImportError:
+        return None
+
+    lang = None
+    is_typescript = suffix in {".ts", ".tsx"}
+
+    if is_typescript:
+        try:
+            import tree_sitter_typescript as tsts  # type: ignore
+            if suffix == ".tsx" and hasattr(tsts, "language_tsx"):
+                lang = Language(tsts.language_tsx())
+            else:
+                lang = Language(tsts.language_typescript())
+        except Exception:
+            lang = None
+        if lang is None:
+            try:
+                import tree_sitter_javascript as tsjs  # type: ignore
+                lang = Language(tsjs.language())
+            except Exception:
+                return None
+    else:
+        try:
+            import tree_sitter_javascript as tsjs  # type: ignore
+            lang = Language(tsjs.language())
+        except Exception:
+            try:
+                import tree_sitter_typescript as tsts  # type: ignore
+                lang = Language(tsts.language_typescript())
+            except Exception:
+                return None
+
+    try:
+        parser = Parser(lang)
+        tree = parser.parse(source.encode("utf-8", errors="replace"))
+    except Exception as exc:
+        logger.debug("[CallGraphIndex] tree-sitter parse failed for %s: %s", file, exc)
+        return None
+
+    symbols: List[FunctionSymbol] = []
+
+    FUNCTION_NODE_TYPES = {
+        "function_declaration",
+        "function_expression",
+        "arrow_function",
+        "method_definition",
+        "generator_function_declaration",
+        "generator_function",
+    }
+
+    def get_name(node) -> str:
+        # function_declaration / generator_function_declaration
+        for child in node.children:
+            if child.type == "identifier":
+                return child.text.decode("utf-8", errors="replace")
+        return "<anonymous>"
+
+    def get_params(node) -> List[str]:
+        params: List[str] = []
+        for child in node.children:
+            if child.type in ("formal_parameters", "parameters"):
+                for param in child.children:
+                    if param.type == "identifier":
+                        params.append(param.text.decode("utf-8", errors="replace"))
+                    elif param.type in ("required_parameter", "optional_parameter"):
+                        for p in param.children:
+                            if p.type == "identifier":
+                                params.append(p.text.decode("utf-8", errors="replace"))
+                                break
+        return params
+
+    def extract_calls(node, line_offset: int) -> List[CallSite]:
+        calls: List[CallSite] = []
+        if node.type == "call_expression":
+            fn_node = node.child_by_field_name("function")
+            if fn_node:
+                name = ""
+                if fn_node.type == "identifier":
+                    name = fn_node.text.decode("utf-8", errors="replace")
+                elif fn_node.type == "member_expression":
+                    prop = fn_node.child_by_field_name("property")
+                    if prop:
+                        name = prop.text.decode("utf-8", errors="replace")
+                if name:
+                    args_node = node.child_by_field_name("arguments")
+                    args: List[str] = []
+                    if args_node:
+                        for arg in args_node.children:
+                            if arg.type == "identifier":
+                                args.append(arg.text.decode("utf-8", errors="replace"))
+                    calls.append(CallSite(function_name=name, line=node.start_point[0] + 1, args=args))
+        for child in node.children:
+            calls.extend(extract_calls(child, line_offset))
+        return calls
+
+    def walk(node, parent_name: Optional[str] = None) -> None:
+        if node.type in FUNCTION_NODE_TYPES:
+            # Determine function name
+            if node.type == "method_definition":
+                name_node = node.child_by_field_name("name")
+                name = name_node.text.decode("utf-8", errors="replace") if name_node else "<anonymous>"
+            elif node.type in ("function_declaration", "generator_function_declaration"):
+                name = get_name(node)
+            else:
+                # arrow_function or function_expression — check parent for variable name
+                name = parent_name or "<anonymous>"
+
+            params = get_params(node)
+            line = node.start_point[0] + 1
+            symbol_id = f"{file}::{name}:{line}"
+
+            symbol = FunctionSymbol(
+                symbol_id=symbol_id,
+                file=file,
+                function_name=name,
+                line=line,
+                parameters=params,
+                language="javascript",
+            )
+            symbol.calls = extract_calls(node, line)
+            symbols.append(symbol)
+
+            # Walk children but pass no parent name (nested functions get their own)
+            for child in node.children:
+                walk(child, None)
+            return
+
+        # For variable declarations, pass the variable name down so arrow functions get named
+        if node.type == "lexical_declaration" or node.type == "variable_declaration":
+            for child in node.children:
+                if child.type == "variable_declarator":
+                    name_node = child.child_by_field_name("name")
+                    var_name = name_node.text.decode("utf-8", errors="replace") if name_node else None
+                    value_node = child.child_by_field_name("value")
+                    if value_node:
+                        walk(value_node, var_name)
+                    else:
+                        walk(child, var_name)
+            return
+
+        for child in node.children:
+            walk(child, None)
+
+    walk(tree.root_node)
+    logger.debug("[CallGraphIndex] tree-sitter found %d symbols in %s", len(symbols), file)
+    return symbols
+
+
+# ------------------------------------------------------------------
+# Regex JS/TS parser (fallback when tree-sitter is unavailable)
+# ------------------------------------------------------------------
 
 class _PythonFunctionVisitor(ast.NodeVisitor):
     def __init__(self, file: str):

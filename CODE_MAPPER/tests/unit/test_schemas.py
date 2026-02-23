@@ -1,12 +1,6 @@
 """Test Pydantic schema validation."""
-import pytest
-from schemas.models import (
-    Agent1bOutput,
-    Agent1eOutput,
-    TaintFinding,
-    ThreatModel,
-    InsecurePracticeFinding,
-)
+
+from schemas.models import Agent1bOutput, Agent1eOutput, ThreatModel
 
 
 class TestAgent1bOutput:
@@ -20,7 +14,7 @@ class TestAgent1bOutput:
                     "intended": "Fetch user by ID",
                     "actual": "Direct SQL query with string concatenation",
                     "diverges": True,
-                    "divergence_note": "No input validation or parameterization"
+                    "divergence_note": "No input validation or parameterization",
                 }
             },
             "insecure_practice_findings": [
@@ -30,7 +24,7 @@ class TestAgent1bOutput:
                     "line_start": 9,
                     "line_end": 9,
                     "snippet": 'query = f"SELECT * FROM users WHERE id = {user_id}"',
-                    "category": "INJECTION_PATTERN",
+                    "category": "INSECURE_PRACTICE",
                     "cwe": "CWE-89",
                     "severity": "CRITICAL",
                     "description": "SQL injection via f-string concatenation",
@@ -39,15 +33,15 @@ class TestAgent1bOutput:
                     "confidence": 0.95,
                     "confidence_reasoning": [
                         "Direct string concatenation with user input",
-                        "SQL execute with unsanitized variable"
+                        "SQL execute with unsanitized variable",
                     ],
                     "false_positive_risk": "LOW",
-                    "false_positive_notes": "This is definitely a SQL injection vulnerability"
+                    "false_positive_notes": "This is definitely a SQL injection vulnerability",
                 }
-            ]
+            ],
         }
         output = Agent1bOutput(**data)
-        assert output.file == "app.py"
+        assert "app.py::get_user" in output.semantics_map
         assert len(output.insecure_practice_findings) == 1
         assert output.insecure_practice_findings[0].cwe == "CWE-89"
 
@@ -59,10 +53,10 @@ class TestAgent1bOutput:
                     "intended": "Fetch user safely",
                     "actual": "Parameterized SQL query",
                     "diverges": False,
-                    "divergence_note": ""
+                    "divergence_note": "",
                 }
             },
-            "insecure_practice_findings": []
+            "insecure_practice_findings": [],
         }
         output = Agent1bOutput(**data)
         assert len(output.insecure_practice_findings) == 0
@@ -77,7 +71,6 @@ class TestAgent1eOutput:
             "file": "app.py",
             "pass1_flow_map": [
                 {
-                    "pair_id": "SSP-001",
                     "source_variable": "user_id",
                     "source_line": 7,
                     "source_type": "HTTP_PARAM",
@@ -88,7 +81,7 @@ class TestAgent1eOutput:
                             "line": 9,
                             "operation": "f-string concatenation",
                             "sanitization_applied": False,
-                            "sanitization_notes": ""
+                            "sanitization_notes": "",
                         }
                     ],
                     "reaches_sinks": [
@@ -98,41 +91,45 @@ class TestAgent1eOutput:
                             "sink_fn": "execute",
                             "sink_type": "SQL_EXECUTION",
                             "path_is_reachable": True,
-                            "reachability_notes": "Direct execution path"
+                            "reachability_notes": "Direct execution path",
                         }
                     ],
-                    "linked_threat_scenario": "TS-001"
                 }
             ],
             "taint_findings": [
                 {
                     "id": "1E-TAINT-001",
-                    "file": "app.py",
-                    "line_start": 7,
-                    "line_end": 9,
-                    "snippet": "user_id = request.args.get('id')\nquery = f\"SELECT * FROM users WHERE id = {user_id}\"",
+                    "source": {"type": "HTTP_PARAM", "variable": "user_id", "line": 7},
+                    "sink": {"type": "SQL_EXECUTION", "function": "execute", "line": 9},
+                    "taint_path": ["HTTP_PARAM:user_id", "f-string query", "sql.execute"],
+                    "sanitization": {
+                        "exists": False,
+                        "correct": False,
+                        "sufficient": False,
+                        "details": "No sanitization or parameterization applied",
+                    },
                     "vulnerability": "SQL_INJECTION",
                     "cwe": "CWE-89",
                     "severity": "CRITICAL",
+                    "domain_risk_context": "HIGH",
+                    "exploit_scenario": "Attacker injects SQL via id parameter",
+                    "verification_1_reachability": "Source reaches sink directly",
+                    "verification_2_sanitization": "No defensive control observed",
+                    "verification_3_adversarial": "Payload 1 OR 1=1 alters query semantics",
                     "confidence": 0.98,
-                    "description": "SQL injection from unsanitized HTTP parameter",
-                    "source": "HTTP_PARAM (user_id)",
-                    "sink": "SQL_EXECUTE",
-                    "taint_path": "HTTP_PARAM → f-string → SQL execute()",
-                    "exploit_scenario": "Attacker: GET /user?id=1 OR 1=1 → extracts all user records",
-                    "adversarial_check": "Parameterization would fix. User input has full control over query structure.",
                     "confidence_reasoning": [
                         "Untrusted source (HTTP parameter)",
-                        "No sanitization applied",
-                        "Dangerous sink (SQL execution)"
+                        "Dangerous sink (SQL execution)",
                     ],
-                    "false_positive_risk": "VERY_LOW",
-                    "false_positive_notes": "Definitive injection vulnerability"
+                    "false_positive_risk": "LOW",
+                    "false_positive_notes": "Direct concatenation into SQL query",
+                    "remediation": "Use parameterized queries",
+                    "snippet": "query = f\"SELECT * FROM users WHERE id = {user_id}\"",
                 }
             ],
             "clean_paths": [],
             "conflict_resolutions": [],
-            "low_confidence_observations": []
+            "low_confidence_observations": [],
         }
         output = Agent1eOutput(**data)
         assert output.file == "app.py"
@@ -148,14 +145,12 @@ class TestAgent1eOutput:
             "clean_paths": [
                 {
                     "source_variable": "user_id",
-                    "source_line": 7,
-                    "sink_variable": "query",
-                    "sanitization_method": "parameterized_query",
-                    "notes": "Properly parameterized SQL"
+                    "sink_fn": "execute",
+                    "reason_clean": "Properly parameterized SQL",
                 }
             ],
             "conflict_resolutions": [],
-            "low_confidence_observations": []
+            "low_confidence_observations": [],
         }
         output = Agent1eOutput(**data)
         assert len(output.taint_findings) == 0
@@ -168,20 +163,74 @@ class TestThreatModel:
     def test_threat_model_creation(self):
         """Create a basic threat model."""
         data = {
-            "system_name": "test_app",
-            "system_description": "Test application",
-            "stride_categories": {
-                "spoofing": ["No authentication mechanism detected"],
-                "tampering": ["Inputs not validated"],
-                "repudiation": ["Logging not configured"],
-                "information_disclosure": ["Sensitive data in SQL queries"],
-                "denial_of_service": ["No rate limiting"],
-                "elevation_of_privilege": ["SQL injection allows data access"]
-            },
-            "prioritized_threat_scenarios": [],
-            "domain_context": "web application",
-            "domain_risk_tier": "HIGH"
+            "methodology": "STRIDE",
+            "domain": "test_app",
+            "domain_risk_tier": "HIGH",
+            "regulatory_context": [],
+            "assets": [
+                {
+                    "asset_id": "A-1",
+                    "name": "User records",
+                    "classification": "PII",
+                    "location": "postgres",
+                    "value": "HIGH",
+                    "value_reasoning": "Contains sensitive user data",
+                }
+            ],
+            "trust_boundaries": [
+                {
+                    "boundary_id": "TB-1",
+                    "name": "Internet to API",
+                    "from_zone": "internet",
+                    "to_zone": "backend",
+                    "crossing_components": ["nginx", "api"],
+                    "data_crossing": ["http requests"],
+                }
+            ],
+            "attack_surface": [
+                {
+                    "surface_id": "AS-1",
+                    "component": "api",
+                    "entry_point": "GET /users/{id}",
+                    "trust_boundary_crossed": "TB-1",
+                    "accepts_untrusted_input": True,
+                    "input_type": "http_param",
+                    "exposed_assets": ["A-1"],
+                }
+            ],
+            "stride_analysis": [
+                {
+                    "component": "api",
+                    "threat_category": "Tampering",
+                    "threat_id": "T-1",
+                    "threat_description": "SQL injection may alter backend query behavior",
+                    "affected_assets": ["A-1"],
+                    "attack_vector": "Unsanitized query parameter",
+                    "likelihood": "HIGH",
+                    "likelihood_reasoning": "Public endpoint and direct query usage",
+                    "impact": "HIGH",
+                    "impact_reasoning": "Potential full table exposure",
+                    "risk_score": "CRITICAL",
+                    "existing_controls": [],
+                    "control_adequacy": "NONE",
+                    "related_terrain_sources": ["api.py:request.args.id"],
+                    "related_terrain_sinks": ["db.py:execute"],
+                }
+            ],
+            "prioritized_threat_scenarios": [
+                {
+                    "scenario_id": "TS-1",
+                    "rank": 1,
+                    "title": "Exploit SQL injection via user id",
+                    "narrative": "Attacker injects SQL payload through id parameter",
+                    "threat_ids": ["T-1"],
+                    "entry_point": "GET /users/{id}",
+                    "targeted_assets": ["A-1"],
+                    "risk_score": "CRITICAL",
+                    "taint_paths_to_investigate": ["api.py:id -> db.py:execute"],
+                }
+            ],
         }
         threat_model = ThreatModel(**data)
-        assert threat_model.system_name == "test_app"
-        assert "spoofing" in threat_model.stride_categories
+        assert threat_model.domain == "test_app"
+        assert threat_model.stride_analysis[0].threat_category == "Tampering"

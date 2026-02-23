@@ -7,7 +7,7 @@ services:
       dockerfile: Dockerfile
     volumes:
       - ${REPO_PATH:-.}:/repo:ro               # Mount target repo (read-only)
-      - ./output:/app/output                    # Analysis output
+      - ${OUTPUT_DIR:-./output}:/app/output     # Analysis output
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.openai.com/v1}
