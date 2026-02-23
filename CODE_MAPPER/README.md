@@ -8,6 +8,8 @@ A multi-agent taint-analysis system for automated security code review. Performs
 ```bash
 pip install -r requirements.txt
 python main.py --repo-path /path/to/repo --output-dir ./output
+# Optional: write per-stage intermediate dumps
+python main.py --repo-path /path/to/repo --output-dir ./output --debug-dump
 ```
 
 **Docker:**
@@ -40,6 +42,10 @@ Phase 6 report files are also generated next to the JSON output:
 - `<report_name>.md` (human-readable Markdown report)
 - `<report_name>.html` (styled HTML report)
 - `<report_name>_tickets.json` (CRITICAL/HIGH remediation tickets)
+
+Optional debug outputs:
+- Pass `--debug-dump` to write per-stage intermediate outputs under:
+  - `output/debug/<report_name>/00_scan.json` ... `10_ctf_artifacts.json`
 
 ## Phase 3 Controls
 
