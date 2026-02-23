@@ -10,16 +10,42 @@ from typing import Dict
 
 from config import settings
 from orchestrator import TaintAnalystOrchestrator
+from orchestrator.repo_resolver import RepoResolver
 from reports import ReportGenerator
+
+logger = logging.getLogger(__name__)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="CODE_MAPPER Taint Analyst Agent")
-    parser.add_argument(
+    repo_group = parser.add_mutually_exclusive_group(required=True)
+    repo_group.add_argument(
         "--repo-path",
         type=Path,
-        required=True,
         help="Path to the target repository to analyze",
+    )
+    repo_group.add_argument(
+        "--repo-url",
+        type=str,
+        help="Remote Git URL to clone and analyze",
+    )
+    parser.add_argument(
+        "--repo-branch",
+        type=str,
+        default="",
+        help="Optional branch to clone when using --repo-url",
+    )
+    parser.add_argument(
+        "--repo-commit",
+        type=str,
+        default="",
+        help="Optional commit SHA to checkout when using --repo-url",
+    )
+    parser.add_argument(
+        "--refresh-clone",
+        action="store_true",
+        default=False,
+        help="Force re-clone even when a cached clone exists for --repo-url",
     )
     parser.add_argument(
         "--output-dir",
@@ -50,6 +76,24 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         default=False,
         help="Write per-agent and per-stage intermediate outputs to <output-dir>/debug/",
+    )
+    parser.add_argument(
+        "--clone-timeout-sec",
+        type=int,
+        default=settings.repo_clone_timeout_sec,
+        help="Timeout per git operation in seconds for --repo-url mode",
+    )
+    parser.add_argument(
+        "--clone-max-attempts",
+        type=int,
+        default=settings.repo_clone_max_attempts,
+        help="Max clone retries for --repo-url mode",
+    )
+    parser.add_argument(
+        "--clone-depth",
+        type=int,
+        default=settings.repo_clone_depth,
+        help="Shallow clone depth for --repo-url mode (0 disables shallow clone)",
     )
     return parser.parse_args()
 
@@ -111,20 +155,51 @@ def _write_debug_dump(result: object, output_dir: Path, base_stem: str) -> Path:
 
 
 async def run(args: argparse.Namespace) -> Dict[str, Path]:
-    repo_path = args.repo_path.resolve()
-    if not repo_path.exists() or not repo_path.is_dir():
-        raise FileNotFoundError(f"Repo path does not exist or is not a directory: {repo_path}")
-
     if not settings.openai_api_key:
         raise RuntimeError(
             "OPENAI_API_KEY is not set. Add it to .env or pass it as an environment variable."
         )
 
-    orchestrator = TaintAnalystOrchestrator(repo_path=repo_path, model=args.model)
-    result = await orchestrator.run()
-
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.repo_path and (args.repo_branch or args.repo_commit or args.refresh_clone):
+        logger.warning(
+            "--repo-branch/--repo-commit/--refresh-clone are ignored when --repo-path is used."
+        )
+
+    clone_cache_dir_setting = Path(settings.repo_clone_cache_dir)
+    if clone_cache_dir_setting.is_absolute():
+        clone_cache_dir = clone_cache_dir_setting
+    else:
+        clone_cache_dir = output_dir / clone_cache_dir_setting
+
+    resolver = RepoResolver(
+        cache_root=clone_cache_dir,
+        clone_timeout_sec=args.clone_timeout_sec,
+        clone_max_attempts=args.clone_max_attempts,
+        clone_depth=args.clone_depth,
+    )
+    resolved_repo = await asyncio.to_thread(
+        resolver.resolve,
+        args.repo_path,
+        args.repo_url,
+        args.repo_branch,
+        args.repo_commit,
+        args.refresh_clone,
+    )
+    repo_path = resolved_repo.repo_path
+    if resolved_repo.source == "cloned":
+        logger.info(
+            "Resolved target via clone: %s (reused_cache=%s)",
+            repo_path,
+            resolved_repo.reused_cache,
+        )
+    else:
+        logger.info("Resolved target via local path: %s", repo_path)
+
+    orchestrator = TaintAnalystOrchestrator(repo_path=repo_path, model=args.model)
+    result = await orchestrator.run()
 
     filename = args.output_file.strip()
     if not filename:
@@ -135,6 +210,17 @@ async def run(args: argparse.Namespace) -> Dict[str, Path]:
     payload = {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "repo_path": str(repo_path),
+        "repo_source": resolved_repo.source,
+        "repo_input": args.repo_url if args.repo_url else str(args.repo_path.resolve()),
+        "repo_clone_metadata": {
+            "repo_url": resolved_repo.repo_url,
+            "branch": resolved_repo.branch,
+            "commit": resolved_repo.commit,
+            "reused_cache": resolved_repo.reused_cache,
+            "cache_dir": str(clone_cache_dir),
+        }
+        if resolved_repo.source == "cloned"
+        else {},
         "model": args.model,
         "summary": result.summary,
         "results": result.to_dict(),
