@@ -31,13 +31,28 @@ services:
       - PHASE3_CROSS_FILE_ENABLED=${PHASE3_CROSS_FILE_ENABLED:-false}
       - PHASE3_CALL_GRAPH_MAX_HOPS=${PHASE3_CALL_GRAPH_MAX_HOPS:-5}
       - PHASE3_CALL_GRAPH_MAX_CHAINS_PER_FILE=${PHASE3_CALL_GRAPH_MAX_CHAINS_PER_FILE:-20}
+      - REPO_URL=${REPO_URL:-}
+      - REPO_BRANCH=${REPO_BRANCH:-}
+      - REPO_COMMIT=${REPO_COMMIT:-}
+      - REFRESH_CLONE=${REFRESH_CLONE:-}
     env_file:
       - .env
     command:
-      - "--repo-path"
-      - "/repo"
-      - "--output-dir"
-      - "/app/output"
-      - "--model"
-      - "${OPENAI_MODEL:-gpt-4o}"
+      - "sh"
+      - "-lc"
+      - >-
+        if [ -n "$REPO_URL" ]; then
+          python main.py
+          --repo-url "$REPO_URL"
+          ${REPO_BRANCH:+--repo-branch "$REPO_BRANCH"}
+          ${REPO_COMMIT:+--repo-commit "$REPO_COMMIT"}
+          ${REFRESH_CLONE:+--refresh-clone}
+          --output-dir /app/output
+          --model "${OPENAI_MODEL:-gpt-4o}";
+        else
+          python main.py
+          --repo-path /repo
+          --output-dir /app/output
+          --model "${OPENAI_MODEL:-gpt-4o}";
+        fi
     restart: "no"
