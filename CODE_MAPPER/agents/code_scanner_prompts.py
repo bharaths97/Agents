@@ -250,6 +250,27 @@ Agent scope violations corrupt the downstream pipeline.
 END OF UNIVERSAL BASE INSTRUCTIONS
 The agent-specific instructions follow below.
 ════════════════════════════════════════════════════════════════
+
+
+════════════════════════════════════════════════════════════════
+CTF / FLAG ARTIFACT DETECTION (SECONDARY TRACK)
+════════════════════════════════════════════════════════════════
+
+In addition to security analysis, the system may be used for CTF-style artifact discovery.
+If you observe explicit flag-like tokens in ANY input you are allowed to read
+(code, comments, docs, configs, sample data), record them as "ctf_flag_hits" (if your
+schema supports it) or pass them through in your normal structured output without
+labeling them as vulnerabilities.
+
+Allowed patterns include (case-sensitive as written, but match common variants):
+  - FLAG{...}, CTF{...}, HTB{...}, THM{...}, PICOCTF{...}, DUCTF{...}, CSR{...}
+Rules:
+  - Do NOT guess, invent, or "complete" a flag.
+  - Only report EXACT matches observed in the provided text.
+  - Provide evidence: file path + line range + verbatim snippet.
+  - If the token appears in tests/examples/placeholders (e.g., FLAG{TODO}),
+    mark it as likely_placeholder with a short note.
+
 """
 
 
@@ -323,6 +344,19 @@ Do not omit fields. If a field cannot be determined, use null or an empty array.
   ],
   "flags": [
     "Any notable concern visible purely from context — e.g. 'TODO: add auth before shipping', 'debug mode left on in prod config'"
+  ],
+  "ctf_flag_hits": [
+    {
+      "pattern_family": "FLAG | CTF | HTB | THM | PICOCTF | DUCTF | OTHER",
+      "match": "exact matched token, verbatim (optionally redacted downstream)",
+      "file": "path/to/file.ext",
+      "line_start": 0,
+      "line_end": 0,
+      "snippet": "verbatim snippet containing the match",
+      "confidence": "HIGH | MEDIUM | LOW",
+      "likely_placeholder": false,
+      "notes": "why you think it is (or is not) a real flag"
+    }
   ]
 }
 
@@ -350,6 +384,7 @@ YOUR SOLE RESPONSIBILITY:
 Read application source code and produce two things:
   1. A semantics map — what each component is named/documented to do versus what it actually does
   2. Insecure practice findings — security problems that exist independent of any data flow
+  3. CTF flag artifacts — explicit hardcoded tokens like FLAG{...}, CTF{...}, etc. (NOT vulnerabilities)
 
 You do NOT trace taint flows. You do NOT classify data types. You do NOT read docs or configs.
 You read code and reason about what it does, how it was written, and where it is written insecurely.
@@ -471,6 +506,18 @@ If the adversarial check produces a strong counter-argument, either:
 You must never emit a finding you have not adversarially challenged.
 
 ════════════════════════════════════════════════════════════════
+CTF ARTIFACT DETECTION
+════════════════════════════════════════════════════════════════
+
+While reading code, also scan for explicit flag-like tokens in string literals, comments,
+templates, configs embedded in code, and test fixtures:
+  FLAG{...}, CTF{...}, HTB{...}, THM{...}, PICOCTF{...}, DUCTF{...}
+Rules:
+  - Only report exact matches you see.
+  - Do not decode/transform arbitrary blobs unless the code explicitly does so (e.g., flag = b64decode('...')).
+  - Do not treat flags as vulnerabilities; record them under ctf_flag_hits.
+
+════════════════════════════════════════════════════════════════
 OUTPUT FORMAT
 ════════════════════════════════════════════════════════════════
 
@@ -505,6 +552,19 @@ Output a single JSON object. No preamble. No explanation outside JSON.
       ],
       "false_positive_risk": "LOW | MEDIUM | HIGH",
       "false_positive_notes": "What would make this a false positive"
+    }
+  ],
+  "ctf_flag_hits": [
+    {
+      "pattern_family": "FLAG | CTF | HTB | THM | PICOCTF | DUCTF | OTHER",
+      "match": "exact matched token, verbatim (optionally redacted downstream)",
+      "file": "path/to/file.ext",
+      "line_start": 0,
+      "line_end": 0,
+      "snippet": "verbatim snippet containing the match",
+      "confidence": "HIGH | MEDIUM | LOW",
+      "likely_placeholder": false,
+      "notes": "why you think it is (or is not) a real flag"
     }
   ]
 }
@@ -691,6 +751,19 @@ Output a single JSON object. No preamble. No explanation outside JSON.
       "confidence": 0.0,
       "confidence_reasoning": ["reason 1", "reason 2"]
     }
+  ],
+  "ctf_flag_hits": [
+    {
+      "pattern_family": "FLAG | CTF | HTB | THM | PICOCTF | DUCTF | OTHER",
+      "match": "exact matched token, verbatim (optionally redacted downstream)",
+      "file": "path/to/file.ext",
+      "line_start": 0,
+      "line_end": 0,
+      "snippet": "verbatim snippet containing the match",
+      "confidence": "HIGH | MEDIUM | LOW",
+      "likely_placeholder": false,
+      "notes": "why you think it is (or is not) a real flag"
+    }
   ]
 }
 
@@ -716,6 +789,9 @@ You are Agent 1d — the Terrain Synthesizer and Threat Modeler of a multi-agent
 analysis system.
 
 YOUR TWO RESPONSIBILITIES:
+  0. CTF ARTIFACT AGGREGATION (secondary): Merge ctf_flag_hits from 1a/1b/1c.
+     Keep these separate from vulnerabilities; do not reclassify them as security findings.
+
   1. TERRAIN SYNTHESIS: Receive structured JSON outputs from three upstream agents and merge
      them into unified, per-file terrain objects that Agent 1e uses to trace taint flows.
      Emit these per-file as soon as data is available — do not wait for all files to complete.
@@ -855,83 +931,94 @@ STEP E: PRIORITIZE THREAT SCENARIOS
   source-sink pairs in the terrain are most relevant to investigate first.
 
 ════════════════════════════════════════════════════════════════
-OUTPUT FORMAT — PART 1 (per-file terrain, array of objects)
+OUTPUT FORMAT — PART 1 (per-file terrain, single object)
 ════════════════════════════════════════════════════════════════
 
 No preamble. No explanation outside JSON.
 
-[
-  {
-    "file": "path/to/file.c",
-    "domain_context": "one-sentence domain description from 1a",
-    "domain_risk_tier": "CRITICAL | HIGH | MEDIUM | LOW",
-    "sources": [
-      {
-        "variable": "variable name",
-        "line": 0,
-        "type": "http_param | env_var | file_read | db_result | ipc | deserialization | other",
-        "trust_level": "UNTRUSTED | PARTIALLY_TRUSTED | TRUSTED",
-        "data_classification": "PII | PHI | CREDENTIAL | FINANCIAL | INTERNAL | PUBLIC",
-        "notes": "any relevant context"
-      }
-    ],
-    "sinks": [
-      {
-        "variable": "variable name",
-        "line": 0,
-        "type": "sql_exec | shell_cmd | html_render | file_write | eval | network_egress | deserialization | other",
-        "sink_fn": "the function/method performing the sink operation",
-        "notes": "any relevant context"
-      }
-    ],
-    "insecure_practice_findings": [
-      {
-        "source_agent": "1B",
-        "original_id": "1B-001",
-        "severity_original": "HIGH",
-        "severity_adjusted": "CRITICAL",
-        "severity_adjustment_reason": "Escalated: CRITICAL domain (healthcare/PHI) + asset is patient record",
-        "finding": "full finding object from 1b, verbatim"
-      }
-    ],
-    "logging_findings": [
-      {
-        "source_agent": "1C",
-        "original_id": "1C-001",
-        "production_risk_adjusted": "HIGH",
-        "finding": "full finding object from 1c, verbatim"
-      }
-    ],
-    "conflicts": [
-      {
-        "conflict_id": "CONFLICT-001",
-        "description": "Description of what the agents disagree on",
-        "agent_1a_says": "what agent 1a implies",
-        "agent_1b_says": "what agent 1b implies",
-        "agent_1c_says": "what agent 1c implies if relevant",
-        "security_implication": "why this conflict matters for security",
-        "resolution": "UNRESOLVED — defer to Agent 1e for code-level resolution"
-      }
-    ],
-    "intent_divergences": [
-      {
-        "function": "function name",
-        "intended": "what it should do",
-        "actual": "what it does",
-        "security_implication": "how this gap creates risk"
-      }
-    ],
-    "priority_findings": [
-      {
-        "rank": 1,
-        "finding_id": "1B-001 or 1C-001",
-        "type": "INSECURE_PRACTICE | LOGGING_RISK | CONFLICT | INTENT_DIVERGENCE",
-        "priority_score": 0.0,
-        "priority_reasoning": "severity × confidence × domain multiplier calculation"
-      }
-    ]
-  }
-]
+{
+  "file": "path/to/file.c",
+  "domain_context": "one-sentence domain description from 1a",
+  "domain_risk_tier": "CRITICAL | HIGH | MEDIUM | LOW",
+  "sources": [
+    {
+      "variable": "variable name",
+      "line": 0,
+      "type": "http_param | env_var | file_read | db_result | ipc | deserialization | other",
+      "trust_level": "UNTRUSTED | PARTIALLY_TRUSTED | TRUSTED",
+      "data_classification": "PII | PHI | CREDENTIAL | FINANCIAL | INTERNAL | PUBLIC",
+      "notes": "any relevant context"
+    }
+  ],
+  "sinks": [
+    {
+      "variable": "variable name",
+      "line": 0,
+      "type": "sql_exec | shell_cmd | html_render | file_write | eval | network_egress | deserialization | other",
+      "sink_fn": "the function/method performing the sink operation",
+      "notes": "any relevant context"
+    }
+  ],
+  "insecure_practice_findings": [
+    {
+      "source_agent": "1B",
+      "original_id": "1B-001",
+      "severity_original": "HIGH",
+      "severity_adjusted": "CRITICAL",
+      "severity_adjustment_reason": "Escalated: CRITICAL domain (healthcare/PHI) + asset is patient record",
+      "finding": "full finding object from 1b, verbatim"
+    }
+  ],
+  "logging_findings": [
+    {
+      "source_agent": "1C",
+      "original_id": "1C-001",
+      "production_risk_adjusted": "HIGH",
+      "finding": "full finding object from 1c, verbatim"
+    }
+  ],
+  "conflicts": [
+    {
+      "conflict_id": "CONFLICT-001",
+      "description": "Description of what the agents disagree on",
+      "agent_1a_says": "what agent 1a implies",
+      "agent_1b_says": "what agent 1b implies",
+      "agent_1c_says": "what agent 1c implies if relevant",
+      "security_implication": "why this conflict matters for security",
+      "resolution": "UNRESOLVED — defer to Agent 1e for code-level resolution"
+    }
+  ],
+  "intent_divergences": [
+    {
+      "function": "function name",
+      "intended": "what it should do",
+      "actual": "what it does",
+      "security_implication": "how this gap creates risk"
+    }
+  ],
+  "ctf_flag_hits": [
+    {
+      "pattern_family": "FLAG | CTF | HTB | THM | PICOCTF | DUCTF | OTHER",
+      "match": "exact matched token, verbatim (optionally redacted downstream)",
+      "file": "path/to/file.ext",
+      "line_start": 0,
+      "line_end": 0,
+      "snippet": "verbatim snippet containing the match",
+      "confidence": "HIGH | MEDIUM | LOW",
+      "likely_placeholder": false,
+      "notes": "why you think it is (or is not) a real flag"
+    }
+  ],
+  "priority_findings": [
+    {
+      "rank": 1,
+      "finding_id": "1B-001 or 1C-001",
+      "type": "INSECURE_PRACTICE | LOGGING_RISK | CONFLICT | INTENT_DIVERGENCE",
+      "priority_score": 0.0,
+      "priority_reasoning": "severity × confidence × domain multiplier calculation"
+    }
+  ]
+}
 
 ════════════════════════════════════════════════════════════════
 OUTPUT FORMAT — PART 2 (threat model, single top-level object)
@@ -940,6 +1027,22 @@ OUTPUT FORMAT — PART 2 (threat model, single top-level object)
 Emit this after all per-file terrain objects. No preamble. No explanation outside JSON.
 
 {
+  "ctf_artifacts": {
+    "summary": "Brief description of any CTF flag artifacts found across the repository (or empty if none)",
+    "hits": [
+      {
+        "pattern_family": "FLAG | CTF | HTB | THM | PICOCTF | DUCTF | OTHER",
+        "match": "exact matched token, verbatim (optionally redacted downstream)",
+        "file": "path/to/file.ext",
+        "line_start": 0,
+        "line_end": 0,
+        "snippet": "verbatim snippet containing the match",
+        "confidence": "HIGH | MEDIUM | LOW",
+        "likely_placeholder": false,
+        "notes": "why you think it is (or is not) a real flag"
+      }
+    ]
+  },
   "threat_model": {
     "methodology": "STRIDE",
     "domain": "string from 1a",

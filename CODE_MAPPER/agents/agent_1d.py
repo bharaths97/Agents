@@ -17,8 +17,14 @@ from typing import Any, Dict, List, Optional, Set
 from .base import BaseAgent
 from .code_scanner_prompts import AGENT_BASE_INSTRUCTIONS, AGENT_1D_SYNTHESIZER
 from schemas.models import (
-    Agent1aOutput, Agent1bOutput, Agent1cOutput,
-    TerrainObject, ThreatModel,
+    Agent1aOutput,
+    Agent1bOutput,
+    Agent1cOutput,
+    CtfArtifacts,
+    CtfFlagHit,
+    TerrainObject,
+    ThreatModel,
+    ThreatModelOutput,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,7 +59,8 @@ CALL MODE: SYSTEM-WIDE THREAT MODEL
 ════════════════════════════════════════════════════════════════
 
 All per-file terrain has been synthesized. You are now producing the single
-system-wide threat model. Output ONLY the JSON object with the "threat_model" key.
+system-wide threat model. Output ONLY the JSON object with the "ctf_artifacts" and
+"threat_model" keys.
 """
 )
 
@@ -67,7 +74,7 @@ class Agent1d(BaseAgent):
         output_1b: Agent1bOutput,
         output_1c: Agent1cOutput,
         terrain_queue: asyncio.Queue,
-    ) -> Optional[ThreatModel]:
+    ) -> ThreatModelOutput:
         """
         Synthesize terrain from Ring 0 outputs. Streams per-file TerrainObjects to
         terrain_queue for Agent 1e. Returns the system-wide threat model.
@@ -79,11 +86,12 @@ class Agent1d(BaseAgent):
             terrain_queue: asyncio.Queue — TerrainObjects go here for Agent 1e
 
         Returns:
-            ThreatModel (system-wide, one per analysis run)
+            ThreatModelOutput (system-wide, one per analysis run)
         """
         logger.info(f"[{self.name}] Starting terrain synthesis")
 
         all_files = self._collect_files(output_1b, output_1c)
+        all_ctf_hits = self._collect_ctf_hits(output_1a, output_1b, output_1c)
         all_terrains: List[TerrainObject] = []
 
         rag_context = await self.retrieve_references(
@@ -98,23 +106,29 @@ class Agent1d(BaseAgent):
                 output_1b=output_1b,
                 output_1c=output_1c,
                 rag_context=rag_context,
+                ctf_hits=all_ctf_hits,
             )
             all_terrains.append(terrain)
             await terrain_queue.put(terrain)
             logger.debug(f"[{self.name}] Emitted terrain for {file_path}")
 
         # Produce the threat model once all per-file terrain is done
-        threat_model = await self._produce_threat_model(output_1a, all_terrains, rag_context)
+        threat_bundle = await self._produce_threat_model(
+            output_1a,
+            all_terrains,
+            rag_context,
+            all_ctf_hits,
+        )
 
         # Signal to Agent 1e that the stream is complete
         await terrain_queue.put(TERRAIN_DONE)
 
         logger.info(
             f"[{self.name}] Complete — {len(all_terrains)} terrain objects, "
-            f"{len(threat_model.stride_analysis)} STRIDE threats, "
-            f"{len(threat_model.prioritized_threat_scenarios)} scenarios"
+            f"{len(threat_bundle.threat_model.stride_analysis)} STRIDE threats, "
+            f"{len(threat_bundle.threat_model.prioritized_threat_scenarios)} scenarios"
         )
-        return threat_model
+        return threat_bundle
 
     def _collect_files(
         self, output_1b: Agent1bOutput, output_1c: Agent1cOutput
@@ -138,6 +152,7 @@ class Agent1d(BaseAgent):
         output_1b: Agent1bOutput,
         output_1c: Agent1cOutput,
         rag_context: str,
+        ctf_hits: List[CtfFlagHit],
     ) -> TerrainObject:
         """Synthesize terrain for a single file."""
 
@@ -188,6 +203,8 @@ the semantics and taxonomy data. Apply domain risk amplification. Flag all confl
 Output ONLY the single per-file terrain JSON object (not an array).
 """
 
+        file_ctf_hits = [hit for hit in ctf_hits if hit.file == file_path]
+
         try:
             raw = await self.call_llm(
                 system_prompt=TERRAIN_SYSTEM_PROMPT,
@@ -197,7 +214,10 @@ Output ONLY the single per-file terrain JSON object (not an array).
             # If model returns an array (should not happen), take first element
             if isinstance(raw, list):
                 raw = raw[0]
-            return TerrainObject(**raw)
+            terrain = TerrainObject(**raw)
+            if file_ctf_hits:
+                terrain = terrain.model_copy(update={"ctf_flag_hits": file_ctf_hits})
+            return terrain
         except Exception as exc:
             logger.error(f"[{self.name}] Terrain synthesis failed for {file_path}: {exc}")
             return TerrainObject(
@@ -211,6 +231,7 @@ Output ONLY the single per-file terrain JSON object (not an array).
                 conflicts=[],
                 intent_divergences=[],
                 priority_findings=[],
+                ctf_flag_hits=file_ctf_hits,
             )
 
     async def _produce_threat_model(
@@ -218,7 +239,8 @@ Output ONLY the single per-file terrain JSON object (not an array).
         output_1a: Agent1aOutput,
         all_terrains: List[TerrainObject],
         rag_context: str,
-    ) -> ThreatModel:
+        ctf_hits: List[CtfFlagHit],
+    ) -> ThreatModelOutput:
         """Produce the system-wide STRIDE threat model once all terrain is ready."""
 
         all_sources = [
@@ -265,17 +287,54 @@ Output ONLY the JSON object with the "threat_model" key.
                 user_prompt=user_prompt,
                 temperature=0.15,
             )
-            return ThreatModel(**raw["threat_model"])
+            threat_payload = raw.get("threat_model", raw)
+            threat_model = ThreatModel(**threat_payload)
+            return ThreatModelOutput(
+                ctf_artifacts=self._build_ctf_artifacts(ctf_hits),
+                threat_model=threat_model,
+            )
         except Exception as exc:
             logger.error(f"[{self.name}] Threat model production failed: {exc}")
-            return ThreatModel(
-                methodology="STRIDE",
-                domain=output_1a.domain,
-                domain_risk_tier=output_1a.domain_risk_tier,
-                regulatory_context=output_1a.regulatory_context,
-                assets=[],
-                trust_boundaries=[],
-                attack_surface=[],
-                stride_analysis=[],
-                prioritized_threat_scenarios=[],
+            return ThreatModelOutput(
+                ctf_artifacts=self._build_ctf_artifacts(ctf_hits),
+                threat_model=ThreatModel(
+                    methodology="STRIDE",
+                    domain=output_1a.domain,
+                    domain_risk_tier=output_1a.domain_risk_tier,
+                    regulatory_context=output_1a.regulatory_context,
+                    assets=[],
+                    trust_boundaries=[],
+                    attack_surface=[],
+                    stride_analysis=[],
+                    prioritized_threat_scenarios=[],
+                ),
             )
+
+    @staticmethod
+    def _collect_ctf_hits(
+        output_1a: Agent1aOutput,
+        output_1b: Agent1bOutput,
+        output_1c: Agent1cOutput,
+    ) -> List[CtfFlagHit]:
+        hits: List[CtfFlagHit] = []
+        hits.extend(output_1a.ctf_flag_hits or [])
+        hits.extend(output_1b.ctf_flag_hits or [])
+        hits.extend(output_1c.ctf_flag_hits or [])
+        if not hits:
+            return []
+        seen = set()
+        unique: List[CtfFlagHit] = []
+        for hit in hits:
+            key = (hit.match, hit.file, hit.line_start, hit.line_end)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(hit)
+        return unique
+
+    @staticmethod
+    def _build_ctf_artifacts(hits: List[CtfFlagHit]) -> CtfArtifacts:
+        if not hits:
+            return CtfArtifacts(summary="", hits=[])
+        summary = f"{len(hits)} potential CTF flag artifact(s) detected."
+        return CtfArtifacts(summary=summary, hits=hits)

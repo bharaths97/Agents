@@ -22,6 +22,13 @@ class Settings(BaseSettings):
     semgrep_timeout_sec: int = 180
     semgrep_max_findings_per_file: int = 50
     semgrep_index_cache_file: str = "output/semgrep_rules_index.json"
+    repo_clone_cache_dir: str = ".repo_cache"
+    repo_clone_timeout_sec: int = 180
+    repo_clone_max_attempts: int = 2
+    repo_clone_depth: int = 1
+    phase3_cross_file_enabled: bool = False
+    phase3_call_graph_max_hops: int = 5
+    phase3_call_graph_max_chains_per_file: int = 20
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

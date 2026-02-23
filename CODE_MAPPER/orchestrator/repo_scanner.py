@@ -23,26 +23,74 @@ SKIP_DIRS = {
 CODE_EXTENSIONS = {
     ".py",
     ".js",
+    ".mjs",
+    ".cjs",
     ".ts",
     ".tsx",
     ".jsx",
+    ".vue",
+    ".svelte",
     ".go",
     ".java",
+    ".scala",
+    ".sc",
+    ".groovy",
+    ".gradle",
+    ".kts",
     ".rb",
     ".php",
+    ".pl",
+    ".pm",
+    ".lua",
     ".c",
     ".cc",
     ".cpp",
     ".h",
     ".hpp",
     ".cs",
+    ".fs",
+    ".fsx",
     ".rs",
     ".swift",
     ".kt",
+    ".dart",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".ps1",
+    ".sql",
+    ".ex",
+    ".exs",
+    ".erl",
+    ".hrl",
+    ".r",
+    ".jl",
 }
 
 DOC_EXTENSIONS = {".md", ".rst", ".txt", ".adoc"}
 CONFIG_EXTENSIONS = {".yml", ".yaml", ".toml", ".ini", ".cfg", ".conf", ".env", ".json"}
+
+CODE_FILENAMES = {
+    "jenkinsfile",
+    "makefile",
+    "rakefile",
+    "gulpfile.js",
+    "gruntfile.js",
+    "dockerfile",
+}
+
+SHEBANG_CODE_TOKENS = {
+    "python",
+    "node",
+    "bash",
+    "sh",
+    "zsh",
+    "ruby",
+    "php",
+    "perl",
+    "lua",
+    "pwsh",
+}
 
 CONTEXT_FILE_NAMES = {
     "dockerfile",
@@ -63,6 +111,7 @@ CONTEXT_FILE_NAMES = {
 class RepoScanResult:
     code_files: List[Path]
     context_files: List[Path]
+    unknown_files: List[Path]
     detected_languages: Dict[str, int]
     detected_frameworks: List[str]
     detected_infra: List[str]
@@ -76,6 +125,7 @@ class RepoScanner:
     def scan(self) -> RepoScanResult:
         code_files: List[Path] = []
         context_files: List[Path] = []
+        unknown_files: List[Path] = []
         language_counts: Dict[str, int] = {}
         manifests: List[Path] = []
 
@@ -83,9 +133,10 @@ class RepoScanner:
             name = path.name.lower()
             suffix = path.suffix.lower()
 
-            if suffix in CODE_EXTENSIONS:
+            if self._is_code_file(path):
                 code_files.append(path)
-                language_counts[suffix] = language_counts.get(suffix, 0) + 1
+                language_key = suffix or name
+                language_counts[language_key] = language_counts.get(language_key, 0) + 1
                 continue
 
             is_context = (
@@ -97,6 +148,8 @@ class RepoScanner:
             )
             if is_context:
                 context_files.append(path)
+            elif self._is_text_file(path):
+                unknown_files.append(path)
 
             if name in {"requirements.txt", "pyproject.toml", "package.json", "pom.xml", "go.mod", "cargo.toml"}:
                 manifests.append(path)
@@ -105,6 +158,7 @@ class RepoScanner:
         return RepoScanResult(
             code_files=sorted(code_files),
             context_files=sorted(context_files),
+            unknown_files=sorted(unknown_files),
             detected_languages=dict(sorted(language_counts.items(), key=lambda kv: kv[0])),
             detected_frameworks=sorted(frameworks),
             detected_infra=sorted(infra),
@@ -127,6 +181,43 @@ class RepoScanner:
     def _should_skip(self, path: Path) -> bool:
         rel_parts = path.relative_to(self.repo_path).parts
         return any(part in SKIP_DIRS for part in rel_parts)
+
+    def _is_code_file(self, path: Path) -> bool:
+        suffix = path.suffix.lower()
+        name = path.name.lower()
+
+        if suffix in CODE_EXTENSIONS:
+            return True
+        if name in CODE_FILENAMES:
+            return True
+        return self._has_code_shebang(path)
+
+    def _has_code_shebang(self, path: Path) -> bool:
+        try:
+            with path.open("rb") as f:
+                line = f.readline(256)
+            if not line.startswith(b"#!"):
+                return False
+            try:
+                shebang = line.decode("utf-8", errors="ignore").lower()
+            except Exception:
+                return False
+            return any(token in shebang for token in SHEBANG_CODE_TOKENS)
+        except Exception:
+            return False
+
+    def _is_text_file(self, path: Path) -> bool:
+        try:
+            with path.open("rb") as f:
+                chunk = f.read(2048)
+            if b"\x00" in chunk:
+                return False
+            if not chunk:
+                return True
+            chunk.decode("utf-8", errors="ignore")
+            return True
+        except Exception:
+            return False
 
     def _detect_stack(
         self,

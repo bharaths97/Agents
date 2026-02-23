@@ -13,6 +13,18 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 # Agent 1a — Context & Domain Reader
 # ---------------------------------------------------------------------------
 
+class CtfFlagHit(BaseModel):
+    pattern_family: Literal["FLAG", "CTF", "HTB", "THM", "PICOCTF", "DUCTF", "OTHER"]
+    match: str
+    file: str
+    line_start: int
+    line_end: int
+    snippet: str
+    confidence: Literal["HIGH", "MEDIUM", "LOW"]
+    likely_placeholder: bool
+    notes: str
+
+
 class UserType(BaseModel):
     type: str
     trust_level: Literal["UNTRUSTED", "PARTIALLY_TRUSTED", "TRUSTED"]
@@ -45,6 +57,7 @@ class Agent1aOutput(BaseModel):
     test_derived_assumptions: List[str]
     notable_developer_comments: List[str]
     flags: List[str]
+    ctf_flag_hits: List[CtfFlagHit] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +104,7 @@ class InsecurePracticeFinding(BaseModel):
 class Agent1bOutput(BaseModel):
     semantics_map: Dict[str, SemanticEntry]
     insecure_practice_findings: List[InsecurePracticeFinding]
+    ctf_flag_hits: List[CtfFlagHit] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +149,7 @@ class LoggingFinding(BaseModel):
 class Agent1cOutput(BaseModel):
     data_taxonomy: Dict[str, DataTaxonomyEntry]
     logging_findings: List[LoggingFinding]
+    ctf_flag_hits: List[CtfFlagHit] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +233,7 @@ class TerrainObject(BaseModel):
     conflicts: List[ConflictEntry]
     intent_divergences: List[IntentDivergence]
     priority_findings: List[PriorityFinding]
+    ctf_flag_hits: List[CtfFlagHit] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +313,16 @@ class ThreatModel(BaseModel):
     prioritized_threat_scenarios: List[ThreatScenario]
 
 
+class CtfArtifacts(BaseModel):
+    summary: str
+    hits: List[CtfFlagHit]
+
+
+class ThreatModelOutput(BaseModel):
+    ctf_artifacts: CtfArtifacts = Field(default_factory=lambda: CtfArtifacts(summary="", hits=[]))
+    threat_model: ThreatModel
+
+
 # ---------------------------------------------------------------------------
 # Agent 1e — Taint Tracer
 # ---------------------------------------------------------------------------
@@ -307,6 +333,10 @@ class TransformationStep(BaseModel):
     operation: str
     sanitization_applied: bool
     sanitization_notes: str
+    crosses_file_boundary: bool = False
+    target_file: Optional[str] = None
+    target_function: Optional[str] = None
+    parameter_mapping: Dict[str, str] = Field(default_factory=dict)
 
 
 class ReachesSink(BaseModel):
@@ -325,6 +355,7 @@ class FlowMapEntry(BaseModel):
     data_classification: str
     transformation_chain: List[TransformationStep]
     reaches_sinks: List[ReachesSink]
+    linked_call_chains: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class SanitizationInfo(BaseModel):
@@ -356,6 +387,9 @@ class TaintFinding(BaseModel):
     false_positive_notes: str
     remediation: str
     snippet: Optional[str] = None
+    crosses_file_boundary: bool = False
+    boundary_hops: List[Dict[str, Any]] = Field(default_factory=list)
+    chain_length: Optional[int] = None
 
     @field_validator("confidence_reasoning")
     @classmethod
