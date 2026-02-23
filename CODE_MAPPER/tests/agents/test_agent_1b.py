@@ -31,7 +31,7 @@ async def test_agent_1b_finds_sql_injection(fixture_repo_py_simple_sqli, mock_op
                 "line_start": 9,
                 "line_end": 9,
                 "snippet": 'query = f"SELECT * FROM users WHERE id = {user_id}"',
-                "category": "INJECTION_PATTERN",
+                "category": "INSECURE_PRACTICE",
                 "cwe": "CWE-89",
                 "severity": "CRITICAL",
                 "description": "SQL injection via f-string",

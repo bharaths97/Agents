@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-5-nano"
     openai_embedding_model: str = "text-embedding-3-small"
     log_level: str = "INFO"
+    debug_dump: bool = False
+    output_dir: str = "output"
     max_tokens_per_chunk: int = 8000
     concurrent_file_workers: int = 3
     min_confidence_reasons: int = 2
