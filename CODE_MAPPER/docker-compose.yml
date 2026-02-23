@@ -43,18 +43,26 @@ services:
     command:
       - |
         set -e
-        if [ -n "$REPO_URL" ]; then
-          BRANCH_ARG=""
-          if [ -n "$REPO_BRANCH" ]; then
-            BRANCH_ARG="--repo-branch $REPO_BRANCH"
-          fi
-          DUMP_ARG=""
-          if [ -n "$DEBUG_DUMP" ]; then
+        echo "[DEBUG] DEBUG_DUMP=$$DEBUG_DUMP" >&2
+        DUMP_ARG=""
+        DEBUG_DUMP_LOWER=$$(printf "%s" "$$DEBUG_DUMP" | tr '[:upper:]' '[:lower:]')
+        echo "[DEBUG] DEBUG_DUMP_LOWER=$$DEBUG_DUMP_LOWER" >&2
+        case "$$DEBUG_DUMP_LOWER" in
+          1|true|yes|on)
             DUMP_ARG="--debug-dump"
+            ;;
+        esac
+        echo "[DEBUG] DUMP_ARG=$$DUMP_ARG" >&2
+        if [ -n "$$REPO_URL" ]; then
+          BRANCH_ARG=""
+          if [ -n "$$REPO_BRANCH" ]; then
+            BRANCH_ARG="--repo-branch $$REPO_BRANCH"
           fi
-          exec python main.py --repo-url "$REPO_URL" $BRANCH_ARG --output-dir /app/output --model "$OPENAI_MODEL" $DUMP_ARG
+          echo "[DEBUG] Executing: python main.py --repo-url \"$$REPO_URL\" $$BRANCH_ARG --output-dir /app/output --model \"$$OPENAI_MODEL\" $$DUMP_ARG" >&2
+          exec python main.py --repo-url "$$REPO_URL" $$BRANCH_ARG --output-dir /app/output --model "$$OPENAI_MODEL" $$DUMP_ARG
         else
-          exec python main.py --repo-path /repo --output-dir /app/output --model "$OPENAI_MODEL"
+          echo "[DEBUG] Executing: python main.py --repo-path /repo --output-dir /app/output --model \"$$OPENAI_MODEL\" $$DUMP_ARG" >&2
+          exec python main.py --repo-path /repo --output-dir /app/output --model "$$OPENAI_MODEL" $$DUMP_ARG
         fi
 
     restart: "no"

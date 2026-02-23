@@ -50,7 +50,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("output"),
+        default=Path(settings.output_dir),
         help="Directory where analysis JSON output will be written",
     )
     parser.add_argument(
@@ -73,8 +73,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--debug-dump",
-        action="store_true",
-        default=False,
+        action=argparse.BooleanOptionalAction,
+        default=settings.debug_dump,
         help="Write per-agent and per-stage intermediate outputs to <output-dir>/debug/",
     )
     parser.add_argument(

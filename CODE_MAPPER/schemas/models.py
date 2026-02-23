@@ -81,7 +81,11 @@ class InsecurePracticeFinding(BaseModel):
         "BUFFER_OVERFLOW", "INTEGER_OVERFLOW", "USE_AFTER_FREE", "DOUBLE_FREE",
         "FORMAT_STRING", "WEAK_CRYPTO", "INSECURE_DEFAULT", "INSECURE_DESERIALIZATION",
         "MISSING_AUTH", "IDOR", "COMMENTED_SECURITY", "RACE_CONDITION",
-        "CREDENTIAL_EXPOSURE", "INSECURE_PRACTICE", "OTHER",
+        "CREDENTIAL_EXPOSURE", "INSECURE_PRACTICE",
+        "SQL_INJECTION", "COMMAND_INJECTION", "PATH_TRAVERSAL", "XSS",
+        "SSRF", "SERVER_SIDE_REQUEST_FORGERY", "XXE", "OPEN_REDIRECT",
+        "INSECURE_REDIRECT", "MASS_ASSIGNMENT", "PROTOTYPE_POLLUTION",
+        "OTHER",
     ]
     cwe: str
     severity: Literal["CRITICAL", "HIGH", "MEDIUM", "LOW"]
@@ -127,6 +131,20 @@ class LoggingFinding(BaseModel):
     logged_data_classification: Literal[
         "PII", "PHI", "CREDENTIAL", "FINANCIAL", "INTERNAL", "PUBLIC", "MIXED"
     ]
+
+    @field_validator("logged_data_classification", mode="before")
+    @classmethod
+    def coerce_classification(cls, v: Any) -> str:
+        # LLM sometimes returns pipe-separated combos like "PII | PUBLIC"; pick most sensitive
+        _SENSITIVITY = ["CREDENTIAL", "PHI", "PII", "FINANCIAL", "INTERNAL", "MIXED", "PUBLIC"]
+        if isinstance(v, str) and ("|" in v or "/" in v or "," in v):
+            import re
+            parts = [p.strip() for p in re.split(r"[|/,]", v)]
+            for label in _SENSITIVITY:
+                if label in parts:
+                    return label
+            return "MIXED"
+        return v
     exposure_mechanism: Literal[
         "DIRECT_VALUE", "OBJECT_SERIALIZATION", "EXCEPTION_SCOPE",
         "FORMAT_STRING", "REQUEST_OBJECT", "OTHER",
@@ -264,7 +282,7 @@ class AttackSurface(BaseModel):
     entry_point: str
     trust_boundary_crossed: str
     accepts_untrusted_input: bool
-    input_type: Literal["http_param", "file_upload", "env_var", "ipc", "other"]
+    input_type: Literal["http_param", "file_upload", "env_var", "ipc", "sql_exec", "db_query", "message_queue", "other"]
     exposed_assets: List[str]
 
 
@@ -283,6 +301,14 @@ class StrideEntry(BaseModel):
     impact: Literal["HIGH", "MEDIUM", "LOW"]
     impact_reasoning: str
     risk_score: Literal["CRITICAL", "HIGH", "MEDIUM", "LOW"]
+
+    @field_validator("impact", mode="before")
+    @classmethod
+    def coerce_impact(cls, v: Any) -> str:
+        # LLM sometimes returns CRITICAL for impact; map to HIGH (CRITICAL is only valid for risk_score)
+        if v == "CRITICAL":
+            return "HIGH"
+        return v
     existing_controls: List[str]
     control_adequacy: Literal["ADEQUATE", "PARTIAL", "NONE"]
     related_terrain_sources: List[str]
