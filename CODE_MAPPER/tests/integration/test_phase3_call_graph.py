@@ -7,7 +7,7 @@ import pytest
 from config import settings
 from orchestrator.call_graph import CallGraphIndex
 from orchestrator.control_plane import TaintAnalystOrchestrator
-from schemas.models import Agent1aOutput, Agent1bOutput, Agent1cOutput, ThreatModel
+from schemas.models import Agent1aOutput, Agent1bOutput, Agent1cOutput, CtfArtifacts, ThreatModel, ThreatModelOutput
 from tooling.semgrep_runner import SemgrepScanResult
 
 
@@ -65,16 +65,19 @@ async def test_phase3_flag_enables_orchestrator_call_graph(fixture_repo_multifil
         insecure_practice_findings=[],
     )
     out_1c = Agent1cOutput(data_taxonomy={}, logging_findings=[])
-    threat_model = ThreatModel(
-        methodology="STRIDE",
-        domain="web application",
-        domain_risk_tier="MEDIUM",
-        regulatory_context=[],
-        assets=[],
-        trust_boundaries=[],
-        attack_surface=[],
-        stride_analysis=[],
-        prioritized_threat_scenarios=[],
+    threat_model = ThreatModelOutput(
+        ctf_artifacts=CtfArtifacts(summary="", hits=[]),
+        threat_model=ThreatModel(
+            methodology="STRIDE",
+            domain="web application",
+            domain_risk_tier="MEDIUM",
+            regulatory_context=[],
+            assets=[],
+            trust_boundaries=[],
+            attack_surface=[],
+            stride_analysis=[],
+            prioritized_threat_scenarios=[],
+        ),
     )
     semgrep = SemgrepScanResult(
         enabled=False,
