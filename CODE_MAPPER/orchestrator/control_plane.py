@@ -37,6 +37,7 @@ class AnalysisResult:
     semgrep: Dict[str, Any]
     threat_model: Dict[str, Any]
     taint_outputs: List[Dict[str, Any]]
+    token_usage: Dict[str, Any]
     summary: Dict[str, Any]
 
     def to_dict(self) -> Dict[str, Any]:
@@ -60,6 +61,7 @@ class AnalysisResult:
             "semgrep": self.semgrep,
             "threat_model": self.threat_model,
             "agent_1e": self.taint_outputs,
+            "token_usage": self.token_usage,
             "summary": self.summary,
         }
 
@@ -113,12 +115,27 @@ class TaintAnalystOrchestrator:
         rag_store = RAGStore(self._resolve_rag_docs())
         await rag_store.initialize()
 
-        semgrep_agent = SemgrepEvidenceAgent(
-            rules_root=self._resolve_semgrep_rules_root(),
-            repo_path=self.repo_path,
-        )
-        semgrep_result: SemgrepScanResult = await semgrep_agent.run(scan)
-        semgrep_findings_by_file = semgrep_result.findings_by_file()
+        # Initialize empty Semgrep result if disabled
+        if not settings.semgrep_enabled:
+            semgrep_result = SemgrepScanResult(
+                enabled=False,
+                rules_root="",
+                rules_indexed=0,
+                rules_selected=0,
+                findings=[],
+                selection_rationale={},
+                error="",
+            )
+            semgrep_findings_by_file = {}
+            logger.info("[Orchestrator] Semgrep disabled, skipping static analysis")
+        else:
+            semgrep_agent = SemgrepEvidenceAgent(
+                rules_root=self._resolve_semgrep_rules_root(),
+                repo_path=self.repo_path,
+            )
+            semgrep_result: SemgrepScanResult = await semgrep_agent.run(scan)
+            semgrep_findings_by_file = semgrep_result.findings_by_file()
+
         if semgrep_result.error:
             logger.warning("[Orchestrator] Semgrep issue: %s", semgrep_result.error)
         else:
@@ -179,6 +196,26 @@ class TaintAnalystOrchestrator:
         agent_1e.threat_model = threat_model
         out_1e: List[Agent1eOutput] = await task_1e
 
+        agent_token_usage = {
+            "agent_1a": agent_1a.get_token_usage(),
+            "agent_1b": agent_1b.get_token_usage(),
+            "agent_1c": agent_1c.get_token_usage(),
+            "agent_1d": agent_1d.get_token_usage(),
+            "agent_1e": agent_1e.get_token_usage(),
+        }
+        token_usage_totals = {
+            "calls": sum(item.get("calls", 0) for item in agent_token_usage.values()),
+            "prompt_tokens": sum(item.get("prompt_tokens", 0) for item in agent_token_usage.values()),
+            "completion_tokens": sum(
+                item.get("completion_tokens", 0) for item in agent_token_usage.values()
+            ),
+            "total_tokens": sum(item.get("total_tokens", 0) for item in agent_token_usage.values()),
+            "cached_tokens": sum(item.get("cached_tokens", 0) for item in agent_token_usage.values()),
+            "reasoning_tokens": sum(
+                item.get("reasoning_tokens", 0) for item in agent_token_usage.values()
+            ),
+        }
+
         phase3_links: List[Dict[str, Any]] = []
         if settings.phase3_cross_file_enabled and call_graph_index is not None:
             linker = LinkedFindingsResolver()
@@ -212,6 +249,8 @@ class TaintAnalystOrchestrator:
                 else 0
             ),
             "phase3_linked_observations": len(phase3_links),
+            "agent_token_usage": agent_token_usage,
+            "token_usage_total": token_usage_totals,
         }
 
         return AnalysisResult(
@@ -226,6 +265,10 @@ class TaintAnalystOrchestrator:
             semgrep=semgrep_result.to_dict(),
             threat_model=threat_model.model_dump(),
             taint_outputs=[item.model_dump() for item in out_1e],
+            token_usage={
+                "per_agent": agent_token_usage,
+                "totals": token_usage_totals,
+            },
             summary=summary,
         )
 

@@ -30,6 +30,14 @@ class BaseAgent:
             project=settings.openai_project,
         )
         self.rag_store = rag_store
+        self._token_usage: Dict[str, int] = {
+            "calls": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cached_tokens": 0,
+            "reasoning_tokens": 0,
+        }
 
     # ------------------------------------------------------------------
     # Core LLM call — always requests JSON output
@@ -52,14 +60,19 @@ class BaseAgent:
         """
         logger.debug(f"[{self.name}] Calling LLM — model={self.model}")
 
+        # Reasoning models (o1, o3, gpt-5 family) only support default temperature
+        _reasoning_prefixes = ("o1", "o3", "gpt-5")
+        _skip_temperature = any(self.model.startswith(p) for p in _reasoning_prefixes)
+
         kwargs: Dict[str, Any] = {
             "model": self.model,
-            "temperature": temperature,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
         }
+        if not _skip_temperature:
+            kwargs["temperature"] = temperature
 
         if response_format:
             kwargs["response_format"] = response_format
@@ -67,6 +80,7 @@ class BaseAgent:
             kwargs["response_format"] = {"type": "json_object"}
 
         response = await self.client.chat.completions.create(**kwargs)
+        self._record_token_usage(response)
         raw = response.choices[0].message.content
 
         try:
@@ -74,6 +88,52 @@ class BaseAgent:
         except json.JSONDecodeError as exc:
             logger.error(f"[{self.name}] JSON parse failure: {exc}\nRaw: {raw[:500]}")
             raise
+
+    def get_token_usage(self) -> Dict[str, Any]:
+        usage = dict(self._token_usage)
+        usage["agent_name"] = self.name
+        usage["model"] = self.model
+        return usage
+
+    def _record_token_usage(self, response: Any) -> None:
+        usage_obj = getattr(response, "usage", None)
+        if usage_obj is None and isinstance(response, dict):
+            usage_obj = response.get("usage")
+
+        self._token_usage["calls"] += 1
+        if usage_obj is None:
+            return
+
+        self._token_usage["prompt_tokens"] += self._int_usage_field(usage_obj, "prompt_tokens")
+        self._token_usage["completion_tokens"] += self._int_usage_field(usage_obj, "completion_tokens")
+        self._token_usage["total_tokens"] += self._int_usage_field(usage_obj, "total_tokens")
+
+        prompt_details = self._usage_subfield(usage_obj, "prompt_tokens_details")
+        completion_details = self._usage_subfield(usage_obj, "completion_tokens_details")
+        if prompt_details is not None:
+            self._token_usage["cached_tokens"] += self._int_usage_field(prompt_details, "cached_tokens")
+        if completion_details is not None:
+            self._token_usage["reasoning_tokens"] += self._int_usage_field(
+                completion_details, "reasoning_tokens"
+            )
+
+    @staticmethod
+    def _usage_subfield(usage_obj: Any, key: str) -> Any:
+        if isinstance(usage_obj, dict):
+            return usage_obj.get(key)
+        return getattr(usage_obj, key, None)
+
+    @staticmethod
+    def _int_usage_field(usage_obj: Any, key: str) -> int:
+        value: Any
+        if isinstance(usage_obj, dict):
+            value = usage_obj.get(key, 0)
+        else:
+            value = getattr(usage_obj, key, 0)
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
 
     # ------------------------------------------------------------------
     # RAG retrieval — optional, used when rag_store is available

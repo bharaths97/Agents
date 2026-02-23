@@ -35,6 +35,7 @@ REPO_URL=https://github.com/org/repo.git REPO_BRANCH=main docker compose up --bu
 A JSON report with:
 - Repository scan results (detected languages, frameworks, infrastructure)
 - Correlated findings (`results.correlated_findings`) with deterministic dedup + ranking
+- Per-agent LLM token usage (`results.token_usage.per_agent`) and totals (`results.token_usage.totals`)
 - Optional Phase 3 call graph summary (`results.call_graph`) and fallback links (`results.phase3_links`)
 - CTF artifact aggregation (`results.ctf_artifacts`)
 - Optional Phase 3 linked-observation count in summary (`summary.phase3_linked_observations`)
@@ -50,7 +51,7 @@ Phase 6 report files are also generated next to the JSON output:
 
 Optional debug outputs:
 - Pass `--debug-dump` to write per-stage intermediate outputs under:
-  - `output/debug/<report_name>/00_scan.json` ... `10_ctf_artifacts.json`
+  - `output/debug/<report_name>/00_scan.json` ... `11_token_usage.json`
 
 ## Phase 3 Controls
 
