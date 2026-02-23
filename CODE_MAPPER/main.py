@@ -45,6 +45,12 @@ def parse_args() -> argparse.Namespace:
         default=settings.log_level,
         help="Logging level (DEBUG, INFO, WARNING, ERROR)",
     )
+    parser.add_argument(
+        "--debug-dump",
+        action="store_true",
+        default=False,
+        help="Write per-agent and per-stage intermediate outputs to <output-dir>/debug/",
+    )
     return parser.parse_args()
 
 
@@ -53,6 +59,55 @@ def configure_logging(level: str) -> None:
         level=getattr(logging, level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
     )
+
+
+def _write_debug_dump(result: object, output_dir: Path, base_stem: str) -> Path:
+    """Write per-agent and per-stage intermediate outputs to <output_dir>/debug/."""
+    debug_dir = output_dir / "debug" / base_stem
+    debug_dir.mkdir(parents=True, exist_ok=True)
+
+    def dump(name: str, data: object) -> None:
+        (debug_dir / name).write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    # Stage 0 — repo scan
+    scan = result.scan  # type: ignore[attr-defined]
+    dump("00_scan.json", {
+        "code_files": [str(p) for p in scan.code_files],
+        "context_files": [str(p) for p in scan.context_files],
+        "unknown_files": [str(p) for p in scan.unknown_files],
+        "detected_languages": scan.detected_languages,
+        "detected_frameworks": scan.detected_frameworks,
+        "detected_infra": scan.detected_infra,
+        "manifests": [str(p) for p in scan.manifests],
+    })
+
+    # Stage 0 — Semgrep evidence
+    dump("01_semgrep.json", result.semgrep)  # type: ignore[attr-defined]
+
+    # Stage 1 — Ring 0 agents (run in parallel)
+    dump("02_agent_1a.json", result.agent_1a)  # type: ignore[attr-defined]
+    dump("03_agent_1b.json", result.agent_1b)  # type: ignore[attr-defined]
+    dump("04_agent_1c.json", result.agent_1c)  # type: ignore[attr-defined]
+
+    # Stage 2a — Agent 1d: threat model (terrain objects are consumed by 1e and not stored separately)
+    dump("05_agent_1d_threat_model.json", result.threat_model)  # type: ignore[attr-defined]
+
+    # Stage 2b — Agent 1e: per-file taint analysis
+    results_dict = result.to_dict()  # type: ignore[attr-defined]
+    agent_1e_outputs = results_dict.get("agent_1e", []) or []
+    dump("06_agent_1e_taint.json", agent_1e_outputs)
+
+    # Stage 3 — Phase 3 call graph and linked observations
+    dump("07_call_graph.json", result.call_graph)  # type: ignore[attr-defined]
+    dump("08_phase3_links.json", result.phase3_links)  # type: ignore[attr-defined]
+
+    # Stage 4 — Phase 2 correlator output
+    dump("09_correlated_findings.json", result.correlated_findings)  # type: ignore[attr-defined]
+
+    # Stage 5 — CTF artifacts
+    dump("10_ctf_artifacts.json", result.ctf_artifacts)  # type: ignore[attr-defined]
+
+    return debug_dir
 
 
 async def run(args: argparse.Namespace) -> Dict[str, Path]:
@@ -93,6 +148,11 @@ async def run(args: argparse.Namespace) -> Dict[str, Path]:
         base_stem=output_path.stem,
     )
     report_paths["json"] = output_path
+
+    if args.debug_dump:
+        debug_dir = _write_debug_dump(result, output_dir, output_path.stem)
+        report_paths["debug"] = debug_dir
+
     return report_paths
 
 
@@ -104,6 +164,8 @@ def main() -> None:
     print(f"Markdown report: {report_paths['markdown']}")
     print(f"HTML report: {report_paths['html']}")
     print(f"Remediation tickets: {report_paths['tickets']}")
+    if "debug" in report_paths:
+        print(f"Debug dumps: {report_paths['debug']}")
 
 
 if __name__ == "__main__":
