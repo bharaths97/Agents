@@ -66,6 +66,6 @@ When enabled, Agent 1e links call chains only when chain-match scores pass a min
 
 ## Documentation
 
-Detailed setup, configuration, architecture, and implementation guidance is in the [`docs/`](./docs/) folder.
-
-Start with [`docs/README.md`](./docs/README.md) for navigation.
+- [Architecture & how it works](./Documentation/architecture.md)
+- [Model comparison — go-sqlite3-ext benchmark](./Documentation/model-comparison.md)
+- [Snyk vs CODE_MAPPER — technical breakdown](./Documentation/snyk-comparison.md)
