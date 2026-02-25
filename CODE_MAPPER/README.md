@@ -67,5 +67,7 @@ When enabled, Agent 1e links call chains only when chain-match scores pass a min
 ## Documentation
 
 - [Architecture & how it works](./Documentation/architecture.md)
-- [Model comparison — go-sqlite3-ext benchmark](./Documentation/model-comparison.md)
-- [Snyk vs CODE_MAPPER — technical breakdown](./Documentation/snyk-comparison.md)
+- [Snyk vs Semgrep vs CODE_MAPPER — tool comparison](./Documentation/tool-comparison.md)
+- [Model comparison — how LLM choice affects results](./Documentation/model-comparison.md)
+- [Full security report — go-sqlite3-ext findings](./Documentation/Test_Report_1.md)
+- [Snyk vs CODE_MAPPER — deep taint path breakdown](./Documentation/snyk-comparison.md)
